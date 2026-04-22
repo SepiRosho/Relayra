@@ -18,23 +18,28 @@ const (
 	StepListenPort
 	StepPublicAddr
 	StepInstanceName
+	StepStorageBackend
+	StepSQLitePath
 	StepRedisAddr
 	StepRedisPort
 	StepRedisPassword
 	StepLogLevel
+	StepAllowListenerExecution
 	StepConfirm
 	StepDone
 )
 
 // SetupWizard is the Bubble Tea model for first-time configuration.
 type SetupWizard struct {
-	step      SetupStep
-	cfg       *config.Config
-	textInput textinput.Model
-	roleIdx   int
-	logIdx    int
-	err       error
-	machineID string
+	step             SetupStep
+	cfg              *config.Config
+	textInput        textinput.Model
+	roleIdx          int
+	storageIdx       int
+	logIdx           int
+	allowListenerIdx int
+	err              error
+	machineID        string
 }
 
 // NewSetupWizard creates a new setup wizard.
@@ -52,10 +57,12 @@ func NewSetupWizard() *SetupWizard {
 	cfg.MachineID = machineID
 
 	return &SetupWizard{
-		step:      StepRole,
-		cfg:       cfg,
-		textInput: ti,
-		machineID: machineID,
+		step:             StepRole,
+		cfg:              cfg,
+		textInput:        ti,
+		storageIdx:       0,
+		allowListenerIdx: 1,
+		machineID:        machineID,
 	}
 }
 
@@ -77,8 +84,14 @@ func (w *SetupWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if w.step == StepRole && w.roleIdx > 0 {
 				w.roleIdx--
 			}
+			if w.step == StepStorageBackend && w.storageIdx > 0 {
+				w.storageIdx--
+			}
 			if w.step == StepLogLevel && w.logIdx > 0 {
 				w.logIdx--
+			}
+			if w.step == StepAllowListenerExecution && w.allowListenerIdx > 0 {
+				w.allowListenerIdx--
 			}
 			return w, nil
 
@@ -86,8 +99,14 @@ func (w *SetupWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if w.step == StepRole && w.roleIdx < 1 {
 				w.roleIdx++
 			}
+			if w.step == StepStorageBackend && w.storageIdx < 1 {
+				w.storageIdx++
+			}
 			if w.step == StepLogLevel && w.logIdx < 3 {
 				w.logIdx++
+			}
+			if w.step == StepAllowListenerExecution && w.allowListenerIdx < 1 {
+				w.allowListenerIdx++
 			}
 			return w, nil
 		}
@@ -105,7 +124,7 @@ func (w *SetupWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (w *SetupWizard) isTextStep() bool {
 	switch w.step {
-	case StepListenAddr, StepListenPort, StepPublicAddr, StepInstanceName, StepRedisAddr, StepRedisPort, StepRedisPassword:
+	case StepListenAddr, StepListenPort, StepPublicAddr, StepInstanceName, StepSQLitePath, StepRedisAddr, StepRedisPort, StepRedisPassword:
 		return true
 	}
 	return false
@@ -175,9 +194,30 @@ func (w *SetupWizard) advance() (tea.Model, tea.Cmd) {
 		}
 		w.cfg.InstanceName = v
 		w.err = nil
-		w.step = StepRedisAddr
-		w.textInput.SetValue(w.cfg.RedisAddr)
-		w.textInput.Placeholder = ""
+		w.step = StepStorageBackend
+
+	case StepStorageBackend:
+		if w.storageIdx == 0 {
+			w.cfg.StorageBackend = "redis"
+			w.step = StepRedisAddr
+			w.textInput.SetValue(w.cfg.RedisAddr)
+			w.textInput.Placeholder = ""
+		} else {
+			w.cfg.StorageBackend = "sqlite"
+			w.step = StepSQLitePath
+			w.textInput.SetValue(w.cfg.SQLitePath)
+			w.textInput.Placeholder = "e.g., /opt/relayra/relayra.db"
+		}
+
+	case StepSQLitePath:
+		v := strings.TrimSpace(w.textInput.Value())
+		if v == "" {
+			w.err = fmt.Errorf("sqlite path is required when using SQLite")
+			return w, nil
+		}
+		w.cfg.SQLitePath = v
+		w.err = nil
+		w.step = StepLogLevel
 
 	case StepRedisAddr:
 		v := strings.TrimSpace(w.textInput.Value())
@@ -209,6 +249,19 @@ func (w *SetupWizard) advance() (tea.Model, tea.Cmd) {
 	case StepLogLevel:
 		levels := []string{"debug", "info", "warn", "error"}
 		w.cfg.LogLevel = levels[w.logIdx]
+		if w.cfg.Role == config.RoleListener {
+			if w.cfg.AllowListenerExecution {
+				w.allowListenerIdx = 0
+			} else {
+				w.allowListenerIdx = 1
+			}
+			w.step = StepAllowListenerExecution
+		} else {
+			w.step = StepConfirm
+		}
+
+	case StepAllowListenerExecution:
+		w.cfg.AllowListenerExecution = w.allowListenerIdx == 0
 		w.step = StepConfirm
 
 	case StepConfirm:
@@ -278,6 +331,35 @@ func (w *SetupWizard) View() string {
 		b.WriteString("\n\n  ")
 		b.WriteString(w.textInput.View())
 
+	case StepStorageBackend:
+		b.WriteString(subtitleStyle.Render("  Storage backend:"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  Choose where Relayra stores peers, queues, results, and tokens"))
+		b.WriteString("\n\n")
+		backends := []string{"Redis", "SQLite"}
+		descs := []string{
+			"Networked store, good for multi-process/shared deployments",
+			"Single-file local database, simpler standalone setup",
+		}
+		for i, backend := range backends {
+			cursor := "  "
+			style := normalStyle
+			if i == w.storageIdx {
+				cursor = "▸ "
+				style = selectedStyle
+			}
+			b.WriteString(style.Render(fmt.Sprintf("%s%-8s", cursor, backend)))
+			b.WriteString(dimStyle.Render(" " + descs[i]))
+			b.WriteString("\n")
+		}
+
+	case StepSQLitePath:
+		b.WriteString(subtitleStyle.Render("  SQLite database path:"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  File path for the local Relayra database"))
+		b.WriteString("\n\n  ")
+		b.WriteString(w.textInput.View())
+
 	case StepRedisAddr:
 		b.WriteString(subtitleStyle.Render("  Redis address:"))
 		b.WriteString("\n")
@@ -319,6 +401,28 @@ func (w *SetupWizard) View() string {
 			b.WriteString("\n")
 		}
 
+	case StepAllowListenerExecution:
+		b.WriteString(subtitleStyle.Render("  Listener-side execution:"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  Allow this Listener to execute relay requests targeted at itself"))
+		b.WriteString("\n\n")
+		options := []string{"Allow", "Refuse"}
+		descs := []string{
+			"Enable duplex execution so requests can target this Listener",
+			"Reject listener-targeted execution requests",
+		}
+		for i, option := range options {
+			cursor := "  "
+			style := normalStyle
+			if i == w.allowListenerIdx {
+				cursor = "▸ "
+				style = selectedStyle
+			}
+			b.WriteString(style.Render(fmt.Sprintf("%s%-8s", cursor, option)))
+			b.WriteString(dimStyle.Render(" " + descs[i]))
+			b.WriteString("\n")
+		}
+
 	case StepConfirm:
 		b.WriteString(subtitleStyle.Render("  Configuration Summary:"))
 		b.WriteString("\n\n")
@@ -329,8 +433,16 @@ func (w *SetupWizard) View() string {
 		if w.cfg.PublicAddr != "" {
 			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Public:"), valueStyle.Render(w.cfg.PublicAddress())))
 		}
-		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Redis:"), valueStyle.Render(w.cfg.RedisURL())))
+		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Storage:"), valueStyle.Render(w.cfg.StorageBackend)))
+		if w.cfg.StorageBackend == "sqlite" {
+			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("SQLite:"), valueStyle.Render(w.cfg.SQLitePath)))
+		} else {
+			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Redis:"), valueStyle.Render(w.cfg.RedisURL())))
+		}
 		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Log Level:"), valueStyle.Render(w.cfg.LogLevel)))
+		if w.cfg.Role == config.RoleListener {
+			b.WriteString(fmt.Sprintf("  %s %t\n", labelStyle.Render("Listener Exec:"), w.cfg.AllowListenerExecution))
+		}
 		b.WriteString("\n")
 		b.WriteString(infoStyle.Render("  Press Enter to save configuration"))
 
