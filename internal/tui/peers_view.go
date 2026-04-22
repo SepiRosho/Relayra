@@ -23,11 +23,12 @@ type PeersView struct {
 }
 
 type peerRow struct {
-	ID         string
-	Name       string
-	MachineID  string
-	LastSeen   string
-	IsListener bool
+	ID           string
+	Name         string
+	MachineID    string
+	LastSeen     string
+	Capabilities []string
+	IsListener   bool
 }
 
 type peersLoadedMsg struct {
@@ -56,11 +57,12 @@ func (pv *PeersView) loadPeers() tea.Msg {
 
 		return peersLoadedMsg{
 			peers: []peerRow{{
-				ID:         listener.ID,
-				Name:       listener.Name,
-				MachineID:  listener.MachineID,
-				LastSeen:   "paired listener",
-				IsListener: true,
+				ID:           listener.ID,
+				Name:         listener.Name,
+				MachineID:    listener.MachineID,
+				LastSeen:     "paired listener",
+				Capabilities: listener.Capabilities,
+				IsListener:   true,
 			}},
 		}
 	}
@@ -73,10 +75,11 @@ func (pv *PeersView) loadPeers() tea.Msg {
 	rows := make([]peerRow, 0, len(list))
 	for _, p := range list {
 		rows = append(rows, peerRow{
-			ID:        p.ID,
-			Name:      p.Name,
-			MachineID: p.MachineID,
-			LastSeen:  p.LastSeen.Format("2006-01-02 15:04:05"),
+			ID:           p.ID,
+			Name:         p.Name,
+			MachineID:    p.MachineID,
+			LastSeen:     p.LastSeen.Format("2006-01-02 15:04:05"),
+			Capabilities: p.Capabilities,
 		})
 	}
 	return peersLoadedMsg{peers: rows}

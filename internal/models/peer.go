@@ -9,6 +9,7 @@ type Peer struct {
 	MachineID     string    `json:"machine_id"`
 	Role          string    `json:"role"`
 	Address       string    `json:"address,omitempty"`
+	Capabilities  []string  `json:"capabilities,omitempty"`
 	EncryptionKey []byte    `json:"-"` // Never serialize the key
 	RegisteredAt  time.Time `json:"registered_at"`
 	LastSeen      time.Time `json:"last_seen"`
@@ -25,17 +26,19 @@ type PairingToken struct {
 
 // PairingRequest is sent by the Sender to the Listener during pairing.
 type PairingRequest struct {
-	Secret    string `json:"secret"`
-	MachineID string `json:"machine_id"`
-	Name      string `json:"name"`
+	Secret       string   `json:"secret"`
+	MachineID    string   `json:"machine_id"`
+	Name         string   `json:"name"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // PairingResponse is returned by the Listener after successful pairing.
 type PairingResponse struct {
-	PeerID       string `json:"peer_id"`
-	ListenerID   string `json:"listener_id"`
-	ListenerName string `json:"listener_name"`
-	MachineID    string `json:"machine_id"`
-	Success      bool   `json:"success"`
-	Error        string `json:"error,omitempty"`
+	PeerID       string   `json:"peer_id"`
+	ListenerID   string   `json:"listener_id"`
+	ListenerName string   `json:"listener_name"`
+	MachineID    string   `json:"machine_id"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Success      bool     `json:"success"`
+	Error        string   `json:"error,omitempty"`
 }

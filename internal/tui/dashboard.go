@@ -31,6 +31,7 @@ type dashboardInfo struct {
 	ListenerName   string
 	ListenerAddr   string
 	ListenerPeerID string
+	ListenerCaps   []string
 }
 
 type dashboardTickMsg struct{}
@@ -82,6 +83,7 @@ func (d *Dashboard) fetchInfo() tea.Msg {
 			info.ListenerName = listener.Name
 			info.ListenerAddr = listener.Address
 			info.ListenerPeerID = listener.ID
+			info.ListenerCaps = listener.Capabilities
 		}
 	}
 
@@ -140,6 +142,9 @@ func (d *Dashboard) View() string {
 		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Listener:"), valueStyle.Render(d.info.ListenerName)))
 		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Address:"), valueStyle.Render(d.info.ListenerAddr)))
 		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Peer ID:"), valueStyle.Render(d.info.ListenerPeerID)))
+		if len(d.info.ListenerCaps) > 0 {
+			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Capabilities:"), valueStyle.Render(strings.Join(d.info.ListenerCaps, ", "))))
+		}
 	} else if d.cfg.Role == config.RoleSender {
 		b.WriteString("\n")
 		b.WriteString(warnStyle.Render("  No listener connected. Run 'relayra pair connect <token>' to pair."))

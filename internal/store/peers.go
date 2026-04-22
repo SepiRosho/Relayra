@@ -6,12 +6,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/relayra/relayra/internal/logger"
 	"github.com/relayra/relayra/internal/models"
 )
+
+func splitCapabilities(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var caps []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			caps = append(caps, part)
+		}
+	}
+	return caps
+}
 
 const (
 	keyPeerPrefix    = "relayra:peer:"
@@ -34,6 +50,7 @@ func (r *Redis) StorePeer(ctx context.Context, peer *models.Peer) error {
 		"machine_id":     peer.MachineID,
 		"role":           peer.Role,
 		"address":        peer.Address,
+		"capabilities":   strings.Join(peer.Capabilities, ","),
 		"encryption_key": hex.EncodeToString(peer.EncryptionKey),
 		"registered_at":  peer.RegisteredAt.Unix(),
 		"last_seen":      peer.LastSeen.Unix(),
@@ -83,6 +100,7 @@ func (r *Redis) GetPeer(ctx context.Context, peerID string) (*models.Peer, error
 		MachineID:     data["machine_id"],
 		Role:          data["role"],
 		Address:       data["address"],
+		Capabilities:  splitCapabilities(data["capabilities"]),
 		EncryptionKey: encKey,
 		RegisteredAt:  registeredAt,
 		LastSeen:      lastSeen,
@@ -215,6 +233,7 @@ func (r *Redis) StoreListenerInfo(ctx context.Context, peer *models.Peer) error 
 		"name":           peer.Name,
 		"machine_id":     peer.MachineID,
 		"address":        peer.Address,
+		"capabilities":   strings.Join(peer.Capabilities, ","),
 		"encryption_key": hex.EncodeToString(peer.EncryptionKey),
 		"registered_at":  peer.RegisteredAt.Unix(),
 	})
@@ -251,6 +270,7 @@ func (r *Redis) GetListenerInfo(ctx context.Context) (*models.Peer, error) {
 		Name:          data["name"],
 		MachineID:     data["machine_id"],
 		Address:       data["address"],
+		Capabilities:  splitCapabilities(data["capabilities"]),
 		EncryptionKey: encKey,
 		RegisteredAt:  registeredAt,
 	}

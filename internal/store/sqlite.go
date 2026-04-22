@@ -25,10 +25,10 @@ type SQLite struct {
 func NewSQLite(path string) (*SQLite, error) {
 	ctx := logger.WithComponent(context.Background(), "store")
 
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is required")
 	}
-	path = strings.TrimSpace(path)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("create sqlite dir %s: %w", filepath.Dir(path), err)
 	}
@@ -68,6 +68,7 @@ func (s *SQLite) initSchema(ctx context.Context) error {
 			machine_id TEXT NOT NULL,
 			role TEXT NOT NULL,
 			address TEXT,
+			capabilities TEXT,
 			encryption_key TEXT NOT NULL,
 			registered_at INTEGER NOT NULL,
 			last_seen INTEGER NOT NULL
@@ -83,6 +84,7 @@ func (s *SQLite) initSchema(ctx context.Context) error {
 			name TEXT NOT NULL,
 			machine_id TEXT NOT NULL,
 			address TEXT,
+			capabilities TEXT,
 			encryption_key TEXT NOT NULL,
 			registered_at INTEGER NOT NULL
 		);`,
@@ -133,6 +135,16 @@ func (s *SQLite) initSchema(ctx context.Context) error {
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("init sqlite schema: %w", err)
+		}
+	}
+
+	migrations := []string{
+		`ALTER TABLE peers ADD COLUMN capabilities TEXT`,
+		`ALTER TABLE listener_info ADD COLUMN capabilities TEXT`,
+	}
+	for _, migration := range migrations {
+		if _, err := s.db.ExecContext(ctx, migration); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("run sqlite migration %q: %w", migration, err)
 		}
 	}
 	return nil
@@ -187,17 +199,18 @@ func (s *SQLite) StorePeer(ctx context.Context, peer *models.Peer) error {
 	ctx = logger.WithPeerID(ctx, peer.ID)
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO peers (id, name, machine_id, role, address, encryption_key, registered_at, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO peers (id, name, machine_id, role, address, capabilities, encryption_key, registered_at, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name,
 			machine_id=excluded.machine_id,
 			role=excluded.role,
 			address=excluded.address,
+			capabilities=excluded.capabilities,
 			encryption_key=excluded.encryption_key,
 			registered_at=excluded.registered_at,
 			last_seen=excluded.last_seen
-	`, peer.ID, peer.Name, peer.MachineID, peer.Role, peer.Address, hex.EncodeToString(peer.EncryptionKey), peer.RegisteredAt.Unix(), peer.LastSeen.Unix())
+	`, peer.ID, peer.Name, peer.MachineID, peer.Role, peer.Address, strings.Join(peer.Capabilities, ","), hex.EncodeToString(peer.EncryptionKey), peer.RegisteredAt.Unix(), peer.LastSeen.Unix())
 	if err != nil {
 		return fmt.Errorf("store peer: %w", err)
 	}
@@ -209,15 +222,16 @@ func (s *SQLite) GetPeer(ctx context.Context, peerID string) (*models.Peer, erro
 	ctx = logger.WithPeerID(ctx, peerID)
 
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, machine_id, role, address, encryption_key, registered_at, last_seen
+		SELECT id, name, machine_id, role, address, capabilities, encryption_key, registered_at, last_seen
 		FROM peers WHERE id = ?
 	`, peerID)
 
 	var peer models.Peer
 	var address sql.NullString
+	var capabilities sql.NullString
 	var encKeyHex string
 	var registeredAt, lastSeen int64
-	if err := row.Scan(&peer.ID, &peer.Name, &peer.MachineID, &peer.Role, &address, &encKeyHex, &registeredAt, &lastSeen); err != nil {
+	if err := row.Scan(&peer.ID, &peer.Name, &peer.MachineID, &peer.Role, &address, &capabilities, &encKeyHex, &registeredAt, &lastSeen); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -226,6 +240,7 @@ func (s *SQLite) GetPeer(ctx context.Context, peerID string) (*models.Peer, erro
 
 	encKey, _ := hex.DecodeString(encKeyHex)
 	peer.Address = address.String
+	peer.Capabilities = splitCapabilities(capabilities.String)
 	peer.EncryptionKey = encKey
 	peer.RegisteredAt = time.Unix(registeredAt, 0)
 	peer.LastSeen = time.Unix(lastSeen, 0)
@@ -234,7 +249,7 @@ func (s *SQLite) GetPeer(ctx context.Context, peerID string) (*models.Peer, erro
 
 func (s *SQLite) ListPeers(ctx context.Context) ([]*models.Peer, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, machine_id, role, address, encryption_key, registered_at, last_seen
+		SELECT id, name, machine_id, role, address, capabilities, encryption_key, registered_at, last_seen
 		FROM peers ORDER BY registered_at ASC
 	`)
 	if err != nil {
@@ -246,13 +261,15 @@ func (s *SQLite) ListPeers(ctx context.Context) ([]*models.Peer, error) {
 	for rows.Next() {
 		var peer models.Peer
 		var address sql.NullString
+		var capabilities sql.NullString
 		var encKeyHex string
 		var registeredAt, lastSeen int64
-		if err := rows.Scan(&peer.ID, &peer.Name, &peer.MachineID, &peer.Role, &address, &encKeyHex, &registeredAt, &lastSeen); err != nil {
+		if err := rows.Scan(&peer.ID, &peer.Name, &peer.MachineID, &peer.Role, &address, &capabilities, &encKeyHex, &registeredAt, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
 		encKey, _ := hex.DecodeString(encKeyHex)
 		peer.Address = address.String
+		peer.Capabilities = splitCapabilities(capabilities.String)
 		peer.EncryptionKey = encKey
 		peer.RegisteredAt = time.Unix(registeredAt, 0)
 		peer.LastSeen = time.Unix(lastSeen, 0)
@@ -336,30 +353,32 @@ func (s *SQLite) GetPairingToken(ctx context.Context, secretHash string) (*model
 
 func (s *SQLite) StoreListenerInfo(ctx context.Context, peer *models.Peer) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO listener_info (singleton, peer_id, name, machine_id, address, encryption_key, registered_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?)
+		INSERT INTO listener_info (singleton, peer_id, name, machine_id, address, capabilities, encryption_key, registered_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(singleton) DO UPDATE SET
 			peer_id=excluded.peer_id,
 			name=excluded.name,
 			machine_id=excluded.machine_id,
 			address=excluded.address,
+			capabilities=excluded.capabilities,
 			encryption_key=excluded.encryption_key,
 			registered_at=excluded.registered_at
-	`, peer.ID, peer.Name, peer.MachineID, peer.Address, hex.EncodeToString(peer.EncryptionKey), peer.RegisteredAt.Unix())
+	`, peer.ID, peer.Name, peer.MachineID, peer.Address, strings.Join(peer.Capabilities, ","), hex.EncodeToString(peer.EncryptionKey), peer.RegisteredAt.Unix())
 	return err
 }
 
 func (s *SQLite) GetListenerInfo(ctx context.Context) (*models.Peer, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT peer_id, name, machine_id, address, encryption_key, registered_at
+		SELECT peer_id, name, machine_id, address, capabilities, encryption_key, registered_at
 		FROM listener_info WHERE singleton = 1
 	`)
 
 	var peer models.Peer
 	var address sql.NullString
+	var capabilities sql.NullString
 	var encKeyHex string
 	var registeredAt int64
-	if err := row.Scan(&peer.ID, &peer.Name, &peer.MachineID, &address, &encKeyHex, &registeredAt); err != nil {
+	if err := row.Scan(&peer.ID, &peer.Name, &peer.MachineID, &address, &capabilities, &encKeyHex, &registeredAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -368,6 +387,7 @@ func (s *SQLite) GetListenerInfo(ctx context.Context) (*models.Peer, error) {
 
 	encKey, _ := hex.DecodeString(encKeyHex)
 	peer.Address = address.String
+	peer.Capabilities = splitCapabilities(capabilities.String)
 	peer.EncryptionKey = encKey
 	peer.RegisteredAt = time.Unix(registeredAt, 0)
 	return &peer, nil

@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -306,4 +307,34 @@ func defaultSQLitePath() string {
 	}
 	dir, _ := os.Getwd()
 	return filepath.Join(dir, "relayra.db")
+}
+
+// Capabilities reports the current instance feature support for pairing and visibility.
+func (c *Config) Capabilities() []string {
+	caps := []string{
+		"relay-v1",
+		"async",
+	}
+	if c.LongPolling {
+		caps = append(caps, "long-poll")
+	}
+	if strings.EqualFold(c.StorageBackend, "sqlite") {
+		caps = append(caps, "sqlite")
+	}
+	if strings.EqualFold(c.StorageBackend, "redis") {
+		caps = append(caps, "redis")
+	}
+	if c.Role == RoleListener {
+		if c.AllowListenerExecution {
+			caps = append(caps, "listener-exec")
+		} else {
+			caps = append(caps, "listener-exec-disabled")
+		}
+	}
+	if c.Role == RoleSender {
+		caps = append(caps, "sender-exec")
+	}
+
+	slices.Sort(caps)
+	return caps
 }

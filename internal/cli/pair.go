@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/relayra/relayra/internal/config"
@@ -149,9 +150,10 @@ var pairConnectCmd = &cobra.Command{
 
 		// Send pairing request
 		pairReq := &models.PairingRequest{
-			Secret:    token.Secret,
-			MachineID: cfg.MachineID,
-			Name:      cfg.InstanceName,
+			Secret:       token.Secret,
+			MachineID:    cfg.MachineID,
+			Name:         cfg.InstanceName,
+			Capabilities: cfg.Capabilities(),
 		}
 
 		pairJSON, _ := json.Marshal(pairReq)
@@ -202,6 +204,7 @@ var pairConnectCmd = &cobra.Command{
 			Name:          pairResp.ListenerName,
 			MachineID:     pairResp.MachineID,
 			Address:       token.ListenerAddr,
+			Capabilities:  pairResp.Capabilities,
 			EncryptionKey: encKey,
 			RegisteredAt:  time.Now(),
 		}
@@ -218,6 +221,9 @@ var pairConnectCmd = &cobra.Command{
 		fmt.Printf("\nPairing successful!\n")
 		fmt.Printf("Connected to Listener: %s (%s)\n", pairResp.ListenerName, token.ListenerAddr)
 		fmt.Printf("Your Peer ID: %s\n", pairResp.PeerID)
+		if len(pairResp.Capabilities) > 0 {
+			fmt.Printf("Listener Capabilities: %s\n", strings.Join(pairResp.Capabilities, ", "))
+		}
 		fmt.Printf("Encryption: AES-256-GCM (key derived)\n")
 		return nil
 	},

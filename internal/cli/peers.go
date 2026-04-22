@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/logger"
@@ -47,6 +48,9 @@ var peersCmd = &cobra.Command{
 				fmt.Printf("  Name:         %s\n", p.Name)
 				fmt.Printf("  Registered:   %s\n", p.RegisteredAt.Format("2006-01-02 15:04:05"))
 				fmt.Printf("  Last Seen:    %s\n", p.LastSeen.Format("2006-01-02 15:04:05"))
+				if len(p.Capabilities) > 0 {
+					fmt.Printf("  Capabilities: %s\n", strings.Join(p.Capabilities, ", "))
+				}
 				fmt.Printf("  Queue Size:   %d\n", qLen)
 				fmt.Println()
 			}
@@ -61,6 +65,9 @@ var peersCmd = &cobra.Command{
 			fmt.Println("Paired Listener:")
 			fmt.Printf("  Name:       %s\n", listener.Name)
 			fmt.Printf("  Address:    %s\n", listener.Address)
+			if len(listener.Capabilities) > 0 {
+				fmt.Printf("  Capabilities: %s\n", strings.Join(listener.Capabilities, ", "))
+			}
 			fmt.Printf("  Paired:     %s\n", listener.RegisteredAt.Format("2006-01-02 15:04:05"))
 
 			pending, _ := rdb.PendingResultsCount(ctx)

@@ -386,6 +386,7 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 		Name:          pairReq.Name,
 		MachineID:     pairReq.MachineID,
 		Role:          string(config.RoleSender),
+		Capabilities:  pairReq.Capabilities,
 		EncryptionKey: encKey,
 		RegisteredAt:  time.Now(),
 		LastSeen:      time.Now(),
@@ -410,6 +411,7 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 		ListenerID:   h.cfg.MachineID,
 		ListenerName: h.cfg.InstanceName,
 		MachineID:    h.cfg.MachineID,
+		Capabilities: h.cfg.Capabilities(),
 		Success:      true,
 	})
 }
@@ -429,6 +431,7 @@ func (h *Handlers) ListPeers(w http.ResponseWriter, r *http.Request) {
 		ID           string    `json:"id"`
 		Name         string    `json:"name"`
 		Role         string    `json:"role"`
+		Capabilities []string  `json:"capabilities,omitempty"`
 		RegisteredAt time.Time `json:"registered_at"`
 		LastSeen     time.Time `json:"last_seen"`
 		QueueSize    int64     `json:"queue_size"`
@@ -441,6 +444,7 @@ func (h *Handlers) ListPeers(w http.ResponseWriter, r *http.Request) {
 			ID:           p.ID,
 			Name:         p.Name,
 			Role:         p.Role,
+			Capabilities: p.Capabilities,
 			RegisteredAt: p.RegisteredAt,
 			LastSeen:     p.LastSeen,
 			QueueSize:    qLen,

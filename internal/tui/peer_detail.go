@@ -191,6 +191,9 @@ func (pd *PeerDetailView) View() string {
 	if p.Address != "" {
 		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Address:"), valueStyle.Render(p.Address)))
 	}
+	if len(p.Capabilities) > 0 {
+		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Capabilities:"), valueStyle.Render(strings.Join(p.Capabilities, ", "))))
+	}
 	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Registered:"), valueStyle.Render(p.RegisteredAt.Format("2006-01-02 15:04:05"))))
 
 	// Last seen with age indicator
