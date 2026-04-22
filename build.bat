@@ -25,6 +25,7 @@ if errorlevel 1 (
 )
 
 echo [3/4] Copying assets...
+copy /y README.md "%DIST%\" >nul
 copy /y GUIDE.md "%DIST%\" >nul
 copy /y scripts\install.sh "%DIST%\" >nul
 copy /y scripts\test-relay.sh "%DIST%\scripts\" >nul

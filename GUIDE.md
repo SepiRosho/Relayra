@@ -1,12 +1,47 @@
-# Relayra — Quick Reference Guide
+# Relayra Guide
 
-## What is Relayra?
+## Overview
 
-Relayra bridges communication between two servers:
-- **Listener** (Server A) — unrestricted internet access, exposes HTTP API
-- **Sender** (Server B) — restricted/firewalled, connects to Listener through proxies
+Relayra bridges HTTP requests between two machines:
 
-The Sender polls the Listener for queued HTTP requests, executes them locally, and returns results. All payloads are encrypted with AES-256-GCM.
+- `listener`: reachable machine that exposes the public Relayra API
+- `sender`: restricted machine that polls the listener, executes requests locally, and returns the results
+
+Relay payloads are encrypted with AES-256-GCM. Senders can connect through HTTP or SOCKS5 proxies, and Relayra can store state in Redis or SQLite.
+
+## Core Concepts
+
+### Listener
+
+The listener:
+
+- accepts relay requests from clients
+- stores queued work
+- returns results to clients
+- pairs with senders using one-time tokens
+- can optionally execute requests on its own side if listener execution is enabled
+
+### Sender
+
+The sender:
+
+- connects outbound to the listener
+- can use configured proxies
+- receives relay jobs over polling or long polling
+- executes requests locally
+- sends finished results back on the next available poll
+
+### Async Requests
+
+Relay requests can include:
+
+```json
+{
+  "async": true
+}
+```
+
+When enabled, the sender can execute that request without waiting for earlier synchronous jobs to finish.
 
 ## Installation
 
@@ -17,66 +52,66 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-The installer will:
-1. Install Redis (if not present)
-2. Create `/opt/relayra/` and `/opt/relayra/logs/`
-3. Copy the binary and symlink to `/usr/local/bin/relayra`
+The installer creates `/opt/relayra/`, installs the binary, and places logs under `/opt/relayra/logs`.
 
 ## First-Time Setup
 
-Run `relayra` with no arguments to launch the setup wizard:
+Run Relayra with no arguments:
 
 ```bash
 relayra
 ```
 
-The wizard will ask for:
-- **Role**: Listener or Sender
-- **Listen address/port**: Network binding
-- **Public address**: External IP/domain for pairing tokens (Listener only)
-- **Instance name**: Human-readable identifier (up to 32 chars)
-- **Redis connection**: Address, port, password
-- **Log level**: debug, info, warn, error
+The setup wizard will ask for:
 
-Configuration is saved to `/opt/relayra/.env`.
+- role: Listener or Sender
+- listen address and port
+- public address for pairing tokens on listeners
+- instance name
+- storage backend: Redis or SQLite
+- Redis settings if Redis is selected
+- log level
+- listener-side execution policy on listener nodes
 
-## Pairing Servers
+Configuration is saved to `/opt/relayra/.env` on installed systems, or to the local working directory in development mode.
 
-### On the Listener:
+## Pairing
+
+### On the Listener
+
+Generate a one-time pairing token:
 
 ```bash
 relayra pair generate --expires 1h
 ```
 
-This prints a one-time token. Copy it to the Sender server.
+### On the Sender
 
-### On the Sender:
-
-First, add at least one proxy:
+Add at least one proxy if your environment requires it:
 
 ```bash
 relayra proxy add socks5://proxy.example.com:1080
-# With authentication:
 relayra proxy add socks5://user:password@proxy.example.com:1080
-# or
 relayra proxy add http://user:password@proxy.example.com:8080
 ```
 
-Then connect:
+Then pair:
 
 ```bash
 relayra pair connect <token>
 ```
 
-## Running the Service
+Pairing exchanges capabilities as well, so each side can see whether the other supports long polling, async execution, storage type, and listener-side execution.
 
-### Foreground (for testing):
+## Running Relayra
+
+### Foreground
 
 ```bash
 relayra run
 ```
 
-### As a systemd service:
+### systemd
 
 ```bash
 relayra service install
@@ -86,7 +121,7 @@ relayra service status
 
 ## Sending Relay Requests
 
-Submit a request to the Listener's API:
+### Standard Request
 
 ```bash
 curl -X POST http://listener-ip:port/api/v1/relay \
@@ -97,242 +132,233 @@ curl -X POST http://listener-ip:port/api/v1/relay \
     "request": {
       "url": "http://localhost:8080/api/data",
       "method": "GET",
-      "headers": {"Authorization": "Bearer token123"}
-    },
-    "webhook_url": "http://your-server.com/callback"
+      "headers": {
+        "Authorization": "Bearer token123"
+      }
+    }
   }'
 ```
 
-> **Note:** The `Authorization: Bearer <token>` header is required when API tokens are configured. If no tokens exist, endpoints are open.
+### Async Request
+
+```bash
+curl -X POST http://listener-ip:port/api/v1/relay \
+  -H "Content-Type: application/json" \
+  -d '{
+    "destination_peer_id": "<sender-peer-id>",
+    "async": true,
+    "request": {
+      "url": "http://localhost:8080/jobs/run",
+      "method": "POST"
+    }
+  }'
 ```
 
-Response:
-```json
-{"request_id": "abc123def456"}
+### Listener-Side Execution
+
+If the listener has listener-side execution enabled, target the listener by using:
+
+- `listener`
+- `self`
+- the listener machine ID
+
+Example:
+
+```bash
+curl -X POST http://listener-ip:port/api/v1/relay \
+  -H "Content-Type: application/json" \
+  -d '{
+    "destination_peer_id": "listener",
+    "request": {
+      "url": "http://127.0.0.1:9000/internal/health",
+      "method": "GET"
+    }
+  }'
 ```
+
+If listener-side execution is disabled, the request is refused.
 
 ## Getting Results
 
-### Poll for result:
+### Poll For Result
 
 ```bash
-curl http://listener-ip:port/api/v1/result/abc123def456
+curl http://listener-ip:port/api/v1/result/<request-id>
 ```
 
-### Or use webhooks:
+### Webhook Delivery
 
-If `webhook_url` was specified, the result is POSTed to that URL automatically when ready. Retries 3 times with exponential backoff on failure.
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `relayra` | Open TUI panel (or setup wizard on first run) |
-| `relayra setup` | Re-run configuration wizard |
-| `relayra run` | Run service in foreground |
-| `relayra service install` | Install systemd service |
-| `relayra service start` | Start the service |
-| `relayra service stop` | Stop the service |
-| `relayra service restart` | Restart the service |
-| `relayra service status` | Check service status |
-| `relayra pair generate` | (Listener) Generate pairing token |
-| `relayra pair connect <token>` | (Sender) Connect to a Listener |
-| `relayra peers` | List connected peers |
-| `relayra proxy add <url>` | (Sender) Add a proxy |
-| `relayra proxy remove <url>` | (Sender) Remove a proxy |
-| `relayra proxy list` | (Sender) List proxies with health |
-| `relayra proxy test [url]` | (Sender) Test proxy connectivity |
-| `relayra proxy reset-cooldown` | (Sender) Reset all proxy failure cooldowns |
-| `relayra token create <name>` | (Listener) Create an API token |
-| `relayra token list` | (Listener) List all API tokens |
-| `relayra token revoke <id>` | (Listener) Revoke an API token |
-| `relayra logs` | View recent logs |
-| `relayra logs --tail 50` | View last 50 log lines |
-| `relayra logs --follow` | Stream logs in real-time |
-| `relayra logs --level error` | Filter by level |
-| `relayra logs --grep request_id` | Search logs |
-| `relayra service uninstall` | Uninstall service, flush Redis data |
-| `relayra reset` | Flush all Relayra data from Redis |
-| `relayra reset --force` | Flush without confirmation prompt |
-| `relayra version` | Show version info |
+If `webhook_url` is included in the relay request, Relayra will POST the result when it is ready and retry on failure.
 
 ## API Authentication
 
-Relayra uses Bearer token authentication to protect API endpoints on the Listener.
+Listener endpoints become protected automatically after the first API token is created.
 
-### Creating Tokens
+Create a token:
 
 ```bash
 relayra token create my-app
 ```
 
-This outputs a 64-character hex token. **Save it immediately** — it cannot be retrieved again.
-
-### Using Tokens
-
-Include the token in requests:
+Use it with:
 
 ```bash
-curl -H "Authorization: Bearer <token>" http://listener:port/api/v1/relay ...
+Authorization: Bearer <token>
 ```
 
-### Protected Endpoints
+Protected endpoints:
 
-- `/api/v1/relay` — Submit relay requests
-- `/api/v1/result/{id}` — Get results
-- `/api/v1/peers` — List peers
+- `POST /api/v1/relay`
+- `GET /api/v1/result/{id}`
+- `GET /api/v1/peers`
 
-### Exempt Endpoints
+Open endpoints:
 
-- `/health` — Always open
-- `/api/v1/poll` — Uses peer encryption (Sender only)
-- `/api/v1/pair` — Uses pairing tokens
+- `GET /health`
+- `POST /api/v1/poll`
+- `POST /api/v1/pair`
 
-### Graceful Activation
+## Proxy Operations
 
-If no API tokens exist, all endpoints are open (backward compatible). Authentication activates automatically when the first token is created.
+List proxies:
 
-### Managing Tokens in TUI
+```bash
+relayra proxy list
+```
 
-On Listener instances, the TUI main menu includes "API Tokens" where you can create, view, and revoke tokens interactively.
+Test connectivity:
 
-## API Endpoints (Listener)
+```bash
+relayra proxy test
+relayra proxy test socks5://proxy.example.com:1080
+```
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/api/v1/relay` | POST | Submit relay request |
-| `/api/v1/result/{id}` | GET | Get request result |
-| `/api/v1/poll` | POST | Polling endpoint (Sender) |
-| `/api/v1/pair` | POST | Pairing endpoint (Sender) |
-| `/api/v1/peers` | GET | List connected peers |
+Measure long-poll stability:
 
-## Configuration (.env)
+```bash
+relayra proxy test-longpoll --samples 3 --wait 30
+```
+
+Reset failed proxy cooldowns:
+
+```bash
+relayra proxy reset-cooldown
+```
+
+## TUI Sections
+
+Listener menu:
+
+- Status Dashboard
+- Manage Peers
+- API Tokens
+- View Logs
+- Settings
+
+Sender menu:
+
+- Status Dashboard
+- Manage Peers
+- Manage Proxies
+- View Logs
+- Settings
+
+The sender peers screen shows the connected listener and its advertised capabilities.
+
+## Configuration
+
+### Identity and Role
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `RELAYRA_MACHINE_ID` | auto | SHA256 machine identifier |
-| `RELAYRA_INSTANCE_NAME` | — | Human-readable name (required) |
-| `RELAYRA_ROLE` | — | `listener` or `sender` |
+|---|---|---|
+| `RELAYRA_MACHINE_ID` | auto | Generated machine identifier |
+| `RELAYRA_INSTANCE_NAME` | required | Human-readable node name |
+| `RELAYRA_ROLE` | required | `listener` or `sender` |
+
+### Network
+
+| Variable | Default | Description |
+|---|---|---|
 | `RELAYRA_LISTEN_ADDR` | `0.0.0.0` | Bind address |
 | `RELAYRA_LISTEN_PORT` | random | Bind port |
+| `RELAYRA_PUBLIC_ADDR` | empty | Public listener address used in pairing tokens |
+
+### Storage
+
+| Variable | Default | Description |
+|---|---|---|
+| `RELAYRA_STORAGE_BACKEND` | `redis` | `redis` or `sqlite` |
+| `RELAYRA_SQLITE_PATH` | `/opt/relayra/relayra.db` | SQLite path when SQLite is enabled |
 | `RELAYRA_REDIS_ADDR` | `127.0.0.1` | Redis host |
 | `RELAYRA_REDIS_PORT` | `6379` | Redis port |
 | `RELAYRA_REDIS_PASSWORD` | empty | Redis password |
-| `RELAYRA_REDIS_DB` | `0` | Redis database number |
-| `RELAYRA_POLL_INTERVAL` | `5` | Poll interval in seconds (Sender) |
-| `RELAYRA_POLL_BATCH_SIZE` | `10` | Max requests per poll (Sender) |
-| `RELAYRA_REQUEST_TIMEOUT` | `30` | HTTP request timeout in seconds |
-| `RELAYRA_LOG_LEVEL` | `info` | debug, info, warn, error |
-| `RELAYRA_LOG_DIR` | `/opt/relayra/logs` | Log file directory |
-| `RELAYRA_LOG_MAX_DAYS` | `7` | Days to keep log files |
-| `RELAYRA_RESULT_TTL` | `86400` | Result TTL in seconds (24h) |
-| `RELAYRA_PUBLIC_ADDR` | — | Public IP/domain for pairing tokens (Listener) |
-| `RELAYRA_WEBHOOK_MAX_RETRIES` | `3` | Max webhook delivery attempts |
+| `RELAYRA_REDIS_DB` | `0` | Redis DB number |
+
+### Polling and Execution
+
+| Variable | Default | Description |
+|---|---|---|
+| `RELAYRA_POLL_INTERVAL` | `5` | Standard poll interval in seconds |
+| `RELAYRA_POLL_BATCH_SIZE` | `10` | Max requests returned per poll |
+| `RELAYRA_REQUEST_TIMEOUT` | `30` | HTTP execution timeout in seconds |
+| `RELAYRA_LONG_POLLING` | `true` | Enable long polling on senders |
+| `RELAYRA_LONG_POLL_WAIT` | `30` | Max long-poll wait window in seconds |
+| `RELAYRA_ASYNC_WORKERS` | `4` | Max concurrent async request workers |
+| `RELAYRA_ALLOW_LISTENER_EXECUTION` | `false` | Allow listener-side request execution |
+
+### Logging and Results
+
+| Variable | Default | Description |
+|---|---|---|
+| `RELAYRA_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `RELAYRA_LOG_DIR` | `/opt/relayra/logs` | Log directory |
+| `RELAYRA_LOG_MAX_DAYS` | `7` | Log retention in days |
+| `RELAYRA_RESULT_TTL` | `86400` | Result retention in seconds |
+| `RELAYRA_WEBHOOK_MAX_RETRIES` | `3` | Webhook retry count |
 
 ## Troubleshooting
 
-### "Redis not responding"
-```bash
-systemctl status redis-server
-systemctl start redis-server
-redis-cli ping    # should return PONG
-```
+### Listener Not Reachable
 
-### "Connection refused" during pairing
-- Verify the Listener is running: `relayra service status`
-- Check the Listener's listen port: `grep LISTEN_PORT /opt/relayra/.env`
-- Verify the proxy is working: `relayra proxy test`
-- Check firewall rules on the Listener
+- verify `relayra run` or `relayra service status`
+- check the listener bind port in `.env`
+- confirm `RELAYRA_PUBLIC_ADDR` is correct
+- confirm firewall rules allow the listener port
 
-### "All proxies exhausted"
-- Check proxy health: `relayra proxy list`
-- Test proxies: `relayra proxy test`
-- Add working proxies: `relayra proxy add <url>`
+### Pairing Fails
 
-### Check logs
-```bash
-relayra logs --tail 100 --level error
-relayra logs --follow
-# Or read the log file directly:
-tail -f /opt/relayra/logs/relayra.log
-```
+- verify the token has not expired
+- confirm the sender can reach the listener through at least one proxy
+- run `relayra proxy test`
+- run `relayra proxy test-longpoll --samples 3 --wait 30`
 
-### Service won't start
-```bash
-# Check what's wrong:
-relayra run   # runs in foreground, shows errors
-journalctl -u relayra -n 50   # systemd journal
-```
+### No Proxies Available
 
-## TUI Panel
+- inspect `relayra proxy list`
+- test each proxy
+- reset cooldowns with `relayra proxy reset-cooldown`
 
-Run `relayra` (after setup) to open the interactive TUI panel with an ASCII banner:
+### Storage Problems
 
-### Listener Menu
-- **Status Dashboard** — Server status, role, peers count, Redis status
-- **Manage Peers** — List peers, press Enter for details (ID, role, address, last seen, queue size), delete
-- **API Tokens** — Create, view, and revoke API tokens for relay request authentication
-- **View Logs** — Browse log files with color-coded severity; `f` switch files, `g`/`G` top/bottom
-- **Settings** — View and edit configuration; editable fields marked with ✎, saves to .env
-
-### Sender Menu
-- **Status Dashboard** — Server status, role, **connected Listener info** (name, address, peer ID)
-- **Manage Peers** — Same as Listener
-- **Manage Proxies** — List proxies, press Enter for details (edit URL/credentials, test, reset cooldown, delete)
-- **View Logs** — Same as Listener
-- **Settings** — Same as Listener
-
-### Editable Settings (via TUI)
-The following settings can be edited inline (press Enter on ✎ fields):
-- Listen address, Redis address/port/DB
-- Poll interval, poll batch size, request timeout
-- Result TTL, log max days, webhook max retries
-
-Changes are saved to `.env`. Restart the service for changes to take effect.
-
-## Test Scripts
-
-Two test scripts are included in `scripts/` for verifying the relay pipeline:
-
-### Relay Test
+For Redis:
 
 ```bash
-sudo bash /opt/relayra/scripts/test-relay.sh
+redis-cli ping
 ```
 
-Auto-detects port from `.env`, picks the first available peer, and relays a GET request to the Listener's own `/health` endpoint via the Sender. Polls for up to 60 seconds.
+For SQLite:
 
-### Webhook Test
+- confirm the database path is writable
+- confirm the configured file exists or its parent directory can be created
+
+### Logs
 
 ```bash
-sudo bash /opt/relayra/scripts/test-webhook.sh
+relayra logs
 ```
 
-Starts a temporary Python HTTP server on port 9999, submits a relay request with `webhook_url`, and waits up to 90 seconds for the callback.
-
-## Uninstalling
+Or read the file directly:
 
 ```bash
-sudo ./install.sh --uninstall
+tail -f /opt/relayra/logs/relayra-YYYY-MM-DD.log
 ```
-
-This will stop the service, remove all files from `/opt/relayra/`, remove the symlink, and flush all `relayra:*` keys from Redis.
-
-Alternatively, to just remove the systemd service and flush Redis:
-
-```bash
-relayra service uninstall
-```
-
-## Architecture Notes
-
-- All poll payloads are encrypted with AES-256-GCM (application-layer)
-- Keys are derived via HKDF from the pairing secret + both machine IDs
-- Requests are executed sequentially on the Sender (no parallelism)
-- Results are stored for 24 hours, then expire from Redis
-- Proxies support HTTP and SOCKS5 protocols with optional username/password authentication
-- Failed proxies are automatically rotated with a 5-minute cooldown
-- Webhooks retry 3 times with exponential backoff (5s, 15s, 45s)
-- API token authentication protects Listener endpoints (graceful: disabled if no tokens exist)
-- Tokens are stored as SHA256 hashes in Redis — plaintext tokens are never persisted
