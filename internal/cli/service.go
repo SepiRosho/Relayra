@@ -93,6 +93,7 @@ func serviceInstall() error {
 }
 
 func serviceCtl(action string) error {
+	fmt.Printf("Running: systemctl %s relayra\n", action)
 	out, err := exec.Command("systemctl", action, "relayra").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl %s relayra: %s: %w", action, string(out), err)

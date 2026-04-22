@@ -50,6 +50,7 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	// Track which request IDs we need to ack
 	var pendingAcks []string
@@ -171,8 +172,25 @@ func doPollCycle(ctx context.Context, cfg *config.Config, rdb store.Backend,
 	}
 
 	pollURL := fmt.Sprintf("http://%s/api/v1/poll", listenerInfo.Address)
-	resp, err := client.Post(pollURL, "application/json", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, pollURL, bytes.NewReader(reqBody))
 	if err != nil {
+		slog.ErrorContext(ctx, "failed to create poll request", "error", err)
+		if len(results) > 0 {
+			rdb.RePushResults(ctx, results)
+		}
+		return ackRequestIDs, false
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.InfoContext(ctx, "poll request cancelled during shutdown", "error", err)
+			if len(results) > 0 {
+				rdb.RePushResults(ctx, results)
+			}
+			return ackRequestIDs, false
+		}
 		slog.ErrorContext(ctx, "poll request failed",
 			"error", err,
 			"proxy", proxyURL,
