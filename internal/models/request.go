@@ -1,0 +1,33 @@
+package models
+
+import "time"
+
+// RelayRequest represents a request submitted by a user to be relayed to a peer.
+type RelayRequest struct {
+	ID            string        `json:"id"`
+	DestinationID string        `json:"destination_peer_id"`
+	WebhookURL    string        `json:"webhook_url,omitempty"`
+	Request       HTTPRequest   `json:"request"`
+	Status        RequestStatus `json:"status"`
+	CreatedAt     time.Time     `json:"created_at"`
+}
+
+// HTTPRequest is the actual HTTP request to be executed on the remote peer.
+type HTTPRequest struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body,omitempty"`
+}
+
+// RequestStatus tracks the lifecycle of a relay request.
+type RequestStatus string
+
+const (
+	StatusPending   RequestStatus = "pending"
+	StatusQueued    RequestStatus = "queued"
+	StatusSent      RequestStatus = "sent" // Sent to Sender in a poll batch
+	StatusExecuting RequestStatus = "executing"
+	StatusCompleted RequestStatus = "completed"
+	StatusFailed    RequestStatus = "failed"
+)
