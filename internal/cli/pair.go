@@ -124,15 +124,25 @@ var pairConnectCmd = &cobra.Command{
 			return fmt.Errorf("invalid token data: %w", err)
 		}
 
-		// Check expiry
-		if time.Now().Unix() > token.ExpiresAt {
-			return fmt.Errorf("pairing token has expired")
+		now := time.Now()
+		expiresAt := time.Unix(token.ExpiresAt, 0)
+		if now.Unix() > token.ExpiresAt {
+			slog.WarnContext(ctx, "pairing token appears expired on sender",
+				"sender_time", now.Format(time.RFC3339),
+				"token_expires_at", expiresAt.Format(time.RFC3339),
+				"note", "continuing and letting listener validate token in case sender clock is skewed",
+			)
+			fmt.Printf("Warning: token appears expired on this server clock.\n")
+			fmt.Printf("  Sender time:  %s\n", now.Format(time.RFC3339))
+			fmt.Printf("  Token expiry: %s\n", expiresAt.Format(time.RFC3339))
+			fmt.Printf("  Continuing anyway and letting the Listener validate it.\n\n")
 		}
 
 		slog.InfoContext(ctx, "decoded pairing token",
 			"listener_addr", token.ListenerAddr,
 			"listener_name", token.ListenerName,
-			"expires_at", time.Unix(token.ExpiresAt, 0).Format(time.RFC3339),
+			"expires_at", expiresAt.Format(time.RFC3339),
+			"sender_time", now.Format(time.RFC3339),
 		)
 
 		fmt.Printf("Connecting to Listener '%s' at %s...\n", token.ListenerName, token.ListenerAddr)
