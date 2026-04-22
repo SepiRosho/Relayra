@@ -13,7 +13,7 @@ import (
 // SettingsView displays the current configuration with inline editing.
 type SettingsView struct {
 	cfg     *config.Config
-	rdb     *store.Redis
+	rdb     store.Backend
 	cursor  int
 	items   []settingItem
 	editing bool
@@ -30,16 +30,22 @@ type settingItem struct {
 
 // editable config keys
 var editableKeys = map[string]bool{
-	"listen_addr":     true,
-	"redis_addr":      true,
-	"redis_port":      true,
-	"redis_db":        true,
-	"poll_interval":   true,
-	"poll_batch_size": true,
-	"request_timeout": true,
-	"result_ttl":      true,
-	"log_max_days":    true,
-	"webhook_retries": true,
+	"listen_addr":              true,
+	"storage_backend":          true,
+	"sqlite_path":              true,
+	"redis_addr":               true,
+	"redis_port":               true,
+	"redis_db":                 true,
+	"poll_interval":            true,
+	"poll_batch_size":          true,
+	"request_timeout":          true,
+	"long_polling":             true,
+	"long_poll_wait":           true,
+	"async_workers":            true,
+	"allow_listener_execution": true,
+	"result_ttl":               true,
+	"log_max_days":             true,
+	"webhook_retries":          true,
 }
 
 type settingsSavedMsg struct {
@@ -47,12 +53,14 @@ type settingsSavedMsg struct {
 }
 
 // NewSettingsView creates a new settings viewer.
-func NewSettingsView(cfg *config.Config, rdb *store.Redis) *SettingsView {
+func NewSettingsView(cfg *config.Config, rdb store.Backend) *SettingsView {
 	items := []settingItem{
 		{"Role", string(cfg.Role), ""},
 		{"Instance Name", cfg.InstanceName, ""},
 		{"Machine ID", cfg.MachineID, ""},
 		{"Listen Address", cfg.ListenAddress(), "listen_addr"},
+		{"Storage Backend", cfg.StorageBackend, "storage_backend"},
+		{"SQLite Path", cfg.SQLitePath, "sqlite_path"},
 	}
 
 	if cfg.PublicAddr != "" {
@@ -66,6 +74,10 @@ func NewSettingsView(cfg *config.Config, rdb *store.Redis) *SettingsView {
 		{"Poll Interval", fmt.Sprintf("%d", cfg.PollInterval), "poll_interval"},
 		{"Poll Batch Size", fmt.Sprintf("%d", cfg.PollBatchSize), "poll_batch_size"},
 		{"Request Timeout", fmt.Sprintf("%d", cfg.RequestTimeout), "request_timeout"},
+		{"Long Polling", fmt.Sprintf("%t", cfg.LongPolling), "long_polling"},
+		{"Long Poll Wait", fmt.Sprintf("%d", cfg.LongPollWait), "long_poll_wait"},
+		{"Async Workers", fmt.Sprintf("%d", cfg.AsyncWorkers), "async_workers"},
+		{"Allow Listener Execution", fmt.Sprintf("%t", cfg.AllowListenerExecution), "allow_listener_execution"},
 		{"Result TTL", fmt.Sprintf("%d", cfg.ResultTTL), "result_ttl"},
 		{"Log Level", cfg.LogLevel, ""},
 		{"Log Directory", cfg.LogDir, ""},
@@ -162,6 +174,17 @@ func (sv *SettingsView) applyEdit() tea.Cmd {
 		case "redis_addr":
 			sv.cfg.RedisAddr = newVal
 			sv.items[sv.cursor].Value = newVal
+		case "storage_backend":
+			switch strings.ToLower(newVal) {
+			case "redis", "sqlite":
+				sv.cfg.StorageBackend = newVal
+				sv.items[sv.cursor].Value = newVal
+			}
+		case "sqlite_path":
+			if newVal != "" {
+				sv.cfg.SQLitePath = newVal
+				sv.items[sv.cursor].Value = newVal
+			}
 		case "redis_port":
 			if v, err := strconv.Atoi(newVal); err == nil && v > 0 && v <= 65535 {
 				sv.cfg.RedisPort = v
@@ -187,6 +210,26 @@ func (sv *SettingsView) applyEdit() tea.Cmd {
 				sv.cfg.RequestTimeout = v
 				sv.items[sv.cursor].Value = newVal
 			}
+		case "long_polling":
+			if v, ok := parseBool(newVal); ok {
+				sv.cfg.LongPolling = v
+				sv.items[sv.cursor].Value = fmt.Sprintf("%t", v)
+			}
+		case "long_poll_wait":
+			if v, err := strconv.Atoi(newVal); err == nil && v >= 1 {
+				sv.cfg.LongPollWait = v
+				sv.items[sv.cursor].Value = newVal
+			}
+		case "async_workers":
+			if v, err := strconv.Atoi(newVal); err == nil && v >= 1 {
+				sv.cfg.AsyncWorkers = v
+				sv.items[sv.cursor].Value = newVal
+			}
+		case "allow_listener_execution":
+			if v, ok := parseBool(newVal); ok {
+				sv.cfg.AllowListenerExecution = v
+				sv.items[sv.cursor].Value = fmt.Sprintf("%t", v)
+			}
 		case "result_ttl":
 			if v, err := strconv.Atoi(newVal); err == nil && v >= 1 {
 				sv.cfg.ResultTTL = v
@@ -206,6 +249,17 @@ func (sv *SettingsView) applyEdit() tea.Cmd {
 
 		err := config.Save(sv.cfg)
 		return settingsSavedMsg{err: err}
+	}
+}
+
+func parseBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
 	}
 }
 

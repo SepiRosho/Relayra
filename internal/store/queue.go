@@ -17,6 +17,34 @@ const (
 	keyRequestPrefix = "relayra:request:"
 )
 
+// StoreRequestMetadata stores request bookkeeping without queueing it.
+func (r *Redis) StoreRequestMetadata(ctx context.Context, peerID string, req *models.RelayRequest) error {
+	ctx = logger.WithComponent(ctx, "store")
+	ctx = logger.WithRequestID(ctx, req.ID)
+	ctx = logger.WithPeerID(ctx, peerID)
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	reqKey := keyRequestPrefix + req.ID
+	if err := r.Client.HSet(ctx, reqKey, map[string]interface{}{
+		"id":          req.ID,
+		"peer_id":     peerID,
+		"webhook_url": req.WebhookURL,
+		"status":      string(req.Status),
+		"created_at":  req.CreatedAt.Unix(),
+		"data":        string(data),
+		"async":       req.Async,
+	}).Err(); err != nil {
+		slog.ErrorContext(ctx, "failed to store request metadata", "error", err)
+		return fmt.Errorf("store request metadata: %w", err)
+	}
+
+	return nil
+}
+
 // EnqueueRequest adds a relay request to the peer's queue.
 func (r *Redis) EnqueueRequest(ctx context.Context, peerID string, req *models.RelayRequest) error {
 	ctx = logger.WithComponent(ctx, "store")
@@ -43,6 +71,7 @@ func (r *Redis) EnqueueRequest(ctx context.Context, peerID string, req *models.R
 		"status":      string(models.StatusQueued),
 		"created_at":  req.CreatedAt.Unix(),
 		"data":        string(data),
+		"async":       req.Async,
 	})
 
 	if _, err := pipe.Exec(ctx); err != nil {

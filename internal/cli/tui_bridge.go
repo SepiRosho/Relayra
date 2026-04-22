@@ -12,7 +12,7 @@ func runTUI() error {
 	if err != nil {
 		return err
 	}
-	rdb, err := store.NewRedis(cfg.RedisURL(), cfg.RedisPassword, cfg.RedisDB)
+	rdb, err := store.Open(cfg)
 	if err != nil {
 		return err
 	}

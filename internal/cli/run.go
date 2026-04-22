@@ -42,9 +42,9 @@ var runCmd = &cobra.Command{
 		)
 
 		// Connect to Redis
-		rdb, err := store.NewRedis(cfg.RedisURL(), cfg.RedisPassword, cfg.RedisDB)
+		rdb, err := store.Open(cfg)
 		if err != nil {
-			return fmt.Errorf("connect to Redis: %w", err)
+			return fmt.Errorf("open storage backend: %w", err)
 		}
 		defer rdb.Close()
 

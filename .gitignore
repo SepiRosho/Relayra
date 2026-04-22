@@ -1,0 +1,28 @@
+# Environment and local runtime config
+.env
+*.env.local
+
+# Build and distribution artifacts
+/build/
+/dist/
+/*.exe
+/*.dll
+/*.so
+/*.dylib
+/*.test
+/*.out
+
+# Logs and local temp files
+*.log
+*.tmp
+*.temp
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

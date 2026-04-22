@@ -8,19 +8,21 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/crypto"
 	"github.com/relayra/relayra/internal/logger"
 	"github.com/relayra/relayra/internal/models"
+	"github.com/relayra/relayra/internal/relayexec"
 	"github.com/relayra/relayra/internal/store"
 	"github.com/relayra/relayra/internal/webhook"
 )
 
 // Handlers holds dependencies for HTTP handlers.
 type Handlers struct {
-	rdb *store.Redis
+	rdb store.Backend
 	cfg *config.Config
 }
 
@@ -57,6 +59,7 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DestinationPeerID string             `json:"destination_peer_id"`
 		WebhookURL        string             `json:"webhook_url,omitempty"`
+		Async             bool               `json:"async,omitempty"`
 		Request           models.HTTPRequest `json:"request"`
 	}
 
@@ -78,14 +81,6 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		req.Request.Method = "GET"
 	}
 
-	// Verify peer exists
-	peer, err := h.rdb.GetPeer(ctx, req.DestinationPeerID)
-	if err != nil || peer == nil {
-		slog.WarnContext(ctx, "relay to unknown peer", "peer_id", req.DestinationPeerID)
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
-		return
-	}
-
 	// Generate request ID
 	idBytes := make([]byte, 16)
 	rand.Read(idBytes)
@@ -95,6 +90,7 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		ID:            requestID,
 		DestinationID: req.DestinationPeerID,
 		WebhookURL:    req.WebhookURL,
+		Async:         req.Async,
 		Request:       req.Request,
 		Status:        models.StatusQueued,
 		CreatedAt:     time.Now(),
@@ -102,6 +98,46 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 
 	ctx = logger.WithRequestID(ctx, requestID)
 	ctx = logger.WithPeerID(ctx, req.DestinationPeerID)
+
+	if h.isListenerDestination(req.DestinationPeerID) {
+		if !h.cfg.AllowListenerExecution {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "listener-side execution is disabled",
+			})
+			return
+		}
+
+		relayReq.DestinationID = h.cfg.MachineID
+		relayReq.Status = models.StatusExecuting
+		if err := h.rdb.StoreRequestMetadata(ctx, relayReq.DestinationID, relayReq); err != nil {
+			slog.ErrorContext(ctx, "failed to persist local relay request", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to queue local execution"})
+			return
+		}
+
+		go h.executeLocalRequest(relayReq)
+
+		slog.InfoContext(ctx, "listener accepted local relay request",
+			"url", req.Request.URL,
+			"method", req.Request.Method,
+			"has_webhook", req.WebhookURL != "",
+			"async", req.Async,
+		)
+
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"request_id": requestID,
+			"status":     "executing",
+			"message":    "Request accepted for listener-side execution",
+		})
+		return
+	}
+
+	// Verify peer exists
+	if peer, err := h.rdb.GetPeer(ctx, req.DestinationPeerID); err != nil || peer == nil {
+		slog.WarnContext(ctx, "relay to unknown peer", "peer_id", req.DestinationPeerID)
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
+		return
+	}
 
 	if err := h.rdb.EnqueueRequest(ctx, req.DestinationPeerID, relayReq); err != nil {
 		slog.ErrorContext(ctx, "failed to enqueue relay request", "error", err)
@@ -243,6 +279,14 @@ func (h *Handlers) Poll(w http.ResponseWriter, r *http.Request) {
 	// Process acks (Sender confirms it received these requests)
 	if len(payloadUp.AckRequestIDs) > 0 {
 		h.rdb.AckRequests(ctx, payloadUp.AckRequestIDs)
+	}
+
+	if pollReq.WaitSeconds > 0 && len(ackResultIDs) == 0 {
+		waitSeconds := pollReq.WaitSeconds
+		if waitSeconds > h.cfg.LongPollWait {
+			waitSeconds = h.cfg.LongPollWait
+		}
+		h.waitForQueuedRequests(ctx, pollReq.PeerID, time.Duration(waitSeconds)*time.Second)
 	}
 
 	// Dequeue new batch for this peer
@@ -413,4 +457,53 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+func (h *Handlers) executeLocalRequest(req *models.RelayRequest) {
+	ctx := logger.WithComponent(context.Background(), "server")
+	ctx = logger.WithRequestID(ctx, req.ID)
+	ctx = logger.WithPeerID(ctx, h.cfg.MachineID)
+
+	result := relayexec.ExecuteRequest(ctx, req, h.cfg.RequestTimeout)
+	if err := h.rdb.StoreResult(ctx, result, h.cfg.ResultTTL); err != nil {
+		slog.ErrorContext(ctx, "failed to store listener-side result", "error", err)
+		return
+	}
+
+	webhookURL, _ := h.rdb.GetRequestWebhookURL(ctx, req.ID)
+	if webhookURL != "" {
+		resultCopy := *result
+		go webhook.Deliver(context.Background(), h.rdb, webhookURL, req.ID, &resultCopy, h.cfg.WebhookMaxRetries)
+	}
+}
+
+func (h *Handlers) isListenerDestination(destinationID string) bool {
+	switch strings.ToLower(strings.TrimSpace(destinationID)) {
+	case "listener", "self", strings.ToLower(h.cfg.MachineID):
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handlers) waitForQueuedRequests(ctx context.Context, peerID string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		qLen, err := h.rdb.QueueLength(ctx, peerID)
+		if err == nil && qLen > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

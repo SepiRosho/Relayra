@@ -9,26 +9,23 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/relayra/relayra/internal/logger"
 	"github.com/relayra/relayra/internal/store"
 	"golang.org/x/net/proxy"
 )
 
 const (
-	keyProxyList         = "relayra:proxy:list"
-	keyProxyStatusPrefix = "relayra:proxy:status:"
-	maxFailCount         = 3
-	cooldownDuration     = 5 * time.Minute
+	maxFailCount     = 3
+	cooldownDuration = 5 * time.Minute
 )
 
 // Manager handles proxy storage, health checking, and rotation.
 type Manager struct {
-	rdb *store.Redis
+	rdb store.Backend
 }
 
 // NewManager creates a new proxy Manager.
-func NewManager(rdb *store.Redis) *Manager {
+func NewManager(rdb store.Backend) *Manager {
 	return &Manager{rdb: rdb}
 }
 
@@ -41,10 +38,7 @@ func (m *Manager) Add(ctx context.Context, proxyURL string, priority float64) er
 		return fmt.Errorf("invalid proxy URL '%s': %w", proxyURL, err)
 	}
 
-	if err := m.rdb.Client.ZAdd(ctx, keyProxyList, redis.Z{
-		Score:  priority,
-		Member: proxyURL,
-	}).Err(); err != nil {
+	if err := m.rdb.AddProxy(ctx, proxyURL, priority); err != nil {
 		slog.ErrorContext(ctx, "failed to add proxy", "url", proxyURL, "error", err)
 		return fmt.Errorf("add proxy: %w", err)
 	}
@@ -57,11 +51,9 @@ func (m *Manager) Add(ctx context.Context, proxyURL string, priority float64) er
 func (m *Manager) Remove(ctx context.Context, proxyURL string) error {
 	ctx = logger.WithComponent(ctx, "proxy")
 
-	if err := m.rdb.Client.ZRem(ctx, keyProxyList, proxyURL).Err(); err != nil {
+	if err := m.rdb.RemoveProxy(ctx, proxyURL); err != nil {
 		return fmt.Errorf("remove proxy: %w", err)
 	}
-	// Clean up status
-	m.rdb.Client.Del(ctx, keyProxyStatusPrefix+hashURL(proxyURL))
 
 	slog.InfoContext(ctx, "proxy removed", "url", proxyURL)
 	return nil
@@ -71,21 +63,19 @@ func (m *Manager) Remove(ctx context.Context, proxyURL string) error {
 func (m *Manager) List(ctx context.Context) ([]ProxyInfo, error) {
 	ctx = logger.WithComponent(ctx, "proxy")
 
-	members, err := m.rdb.Client.ZRangeWithScores(ctx, keyProxyList, 0, -1).Result()
+	records, err := m.rdb.ListProxyRecords(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list proxies: %w", err)
 	}
 
 	var proxies []ProxyInfo
-	for _, member := range members {
-		proxyURL := member.Member.(string)
-		status := m.getStatus(ctx, proxyURL)
+	for _, record := range records {
 		proxies = append(proxies, ProxyInfo{
-			URL:         proxyURL,
-			Priority:    member.Score,
-			FailCount:   status.FailCount,
-			LastChecked: status.LastChecked,
-			Healthy:     status.FailCount < maxFailCount,
+			URL:         record.URL,
+			Priority:    record.Priority,
+			FailCount:   record.FailCount,
+			LastChecked: record.LastChecked,
+			Healthy:     record.FailCount < maxFailCount,
 		})
 	}
 
@@ -143,11 +133,10 @@ func (m *Manager) GetTransport(ctx context.Context) (http.RoundTripper, string, 
 // MarkSuccess resets the fail count for a proxy.
 func (m *Manager) MarkSuccess(ctx context.Context, proxyURL string) {
 	ctx = logger.WithComponent(ctx, "proxy")
-	statusKey := keyProxyStatusPrefix + hashURL(proxyURL)
-	m.rdb.Client.HSet(ctx, statusKey, map[string]interface{}{
-		"fail_count":   0,
-		"last_checked": time.Now().Unix(),
-	})
+	if err := m.rdb.MarkProxySuccess(ctx, proxyURL); err != nil {
+		slog.WarnContext(ctx, "failed to mark proxy healthy", "url", proxyURL, "error", err)
+		return
+	}
 	slog.DebugContext(ctx, "proxy marked healthy", "url", proxyURL)
 }
 
@@ -158,12 +147,11 @@ func (m *Manager) MarkFailed(ctx context.Context, proxyURL string) {
 
 func (m *Manager) markFailed(ctx context.Context, proxyURL string) {
 	ctx = logger.WithComponent(ctx, "proxy")
-	statusKey := keyProxyStatusPrefix + hashURL(proxyURL)
-
-	m.rdb.Client.HIncrBy(ctx, statusKey, "fail_count", 1)
-	m.rdb.Client.HSet(ctx, statusKey, "last_checked", time.Now().Unix())
-
-	failCount, _ := m.rdb.Client.HGet(ctx, statusKey, "fail_count").Int()
+	failCount, err := m.rdb.MarkProxyFailed(ctx, proxyURL)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to mark proxy failed", "url", proxyURL, "error", err)
+		return
+	}
 	slog.WarnContext(ctx, "proxy marked failed", "url", proxyURL, "fail_count", failCount)
 }
 
@@ -206,11 +194,13 @@ func (m *Manager) ResetAllCooldowns(ctx context.Context) (int, error) {
 	count := 0
 	for _, p := range proxies {
 		if p.FailCount > 0 {
-			m.MarkSuccess(ctx, p.URL)
 			count++
 		}
 	}
-
+	count, err = m.rdb.ResetAllProxyCooldowns(ctx)
+	if err != nil {
+		return 0, err
+	}
 	slog.InfoContext(ctx, "reset all proxy cooldowns", "reset_count", count)
 	return count, nil
 }
@@ -226,19 +216,7 @@ func (m *Manager) ResetCooldown(ctx context.Context, proxyURL string) error {
 // UpdateURL replaces a proxy URL while preserving its priority.
 func (m *Manager) UpdateURL(ctx context.Context, oldURL, newURL string) error {
 	ctx = logger.WithComponent(ctx, "proxy")
-
-	// Get old priority
-	score, err := m.rdb.Client.ZScore(ctx, keyProxyList, oldURL).Result()
-	if err != nil {
-		return fmt.Errorf("proxy not found: %w", err)
-	}
-
-	// Remove old, add new
-	pipe := m.rdb.Client.Pipeline()
-	pipe.ZRem(ctx, keyProxyList, oldURL)
-	pipe.Del(ctx, keyProxyStatusPrefix+hashURL(oldURL))
-	pipe.ZAdd(ctx, keyProxyList, redis.Z{Score: score, Member: newURL})
-	if _, err := pipe.Exec(ctx); err != nil {
+	if err := m.rdb.UpdateProxyURL(ctx, oldURL, newURL); err != nil {
 		return fmt.Errorf("update proxy URL: %w", err)
 	}
 
@@ -248,29 +226,12 @@ func (m *Manager) UpdateURL(ctx context.Context, oldURL, newURL string) error {
 
 // Count returns the number of configured proxies.
 func (m *Manager) Count(ctx context.Context) (int64, error) {
-	return m.rdb.Client.ZCard(ctx, keyProxyList).Result()
+	return m.rdb.ProxyCount(ctx)
 }
 
-type proxyStatus struct {
-	FailCount   int
-	LastChecked time.Time
-}
-
-func (m *Manager) getStatus(ctx context.Context, proxyURL string) proxyStatus {
-	statusKey := keyProxyStatusPrefix + hashURL(proxyURL)
-	data, err := m.rdb.Client.HGetAll(ctx, statusKey).Result()
-	if err != nil || len(data) == 0 {
-		return proxyStatus{}
-	}
-
-	var status proxyStatus
-	if fc, err := m.rdb.Client.HGet(ctx, statusKey, "fail_count").Int(); err == nil {
-		status.FailCount = fc
-	}
-	if lc, err := m.rdb.Client.HGet(ctx, statusKey, "last_checked").Int64(); err == nil {
-		status.LastChecked = time.Unix(lc, 0)
-	}
-	return status
+// TransportForURL builds an HTTP transport for a specific configured proxy URL.
+func (m *Manager) TransportForURL(proxyURL string) (http.RoundTripper, error) {
+	return m.createTransport(proxyURL)
 }
 
 func (m *Manager) createTransport(proxyURL string) (http.RoundTripper, error) {
@@ -315,13 +276,4 @@ func (m *Manager) createTransport(proxyURL string) (http.RoundTripper, error) {
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme: %s", parsed.Scheme)
 	}
-}
-
-func hashURL(u string) string {
-	// Simple hash for Redis key - use first 16 chars of URL hash
-	h := fmt.Sprintf("%x", u)
-	if len(h) > 16 {
-		h = h[:16]
-	}
-	return h
 }

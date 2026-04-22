@@ -13,7 +13,7 @@ import (
 // Dashboard is the Bubble Tea model for the live status view.
 type Dashboard struct {
 	cfg   *config.Config
-	rdb   *store.Redis
+	rdb   store.Backend
 	info  dashboardInfo
 	err   error
 	ready bool
@@ -24,7 +24,8 @@ type dashboardInfo struct {
 	InstanceName   string
 	MachineID      string
 	ListenAddr     string
-	RedisStatus    string
+	StorageBackend string
+	StorageStatus  string
 	PeerCount      int
 	QueueSize      int
 	ListenerName   string
@@ -39,7 +40,7 @@ type dashboardInfoMsg struct {
 }
 
 // NewDashboard creates a new dashboard view.
-func NewDashboard(cfg *config.Config, rdb *store.Redis) *Dashboard {
+func NewDashboard(cfg *config.Config, rdb store.Backend) *Dashboard {
 	return &Dashboard{
 		cfg: cfg,
 		rdb: rdb,
@@ -52,19 +53,20 @@ func (d *Dashboard) Init() tea.Cmd {
 
 func (d *Dashboard) fetchInfo() tea.Msg {
 	info := dashboardInfo{
-		Role:         string(d.cfg.Role),
-		InstanceName: d.cfg.InstanceName,
-		MachineID:    d.cfg.MachineID,
-		ListenAddr:   d.cfg.ListenAddress(),
+		Role:           string(d.cfg.Role),
+		InstanceName:   d.cfg.InstanceName,
+		MachineID:      d.cfg.MachineID,
+		ListenAddr:     d.cfg.ListenAddress(),
+		StorageBackend: d.cfg.StorageBackend,
 	}
 
 	ctx := context.Background()
 
 	// Check Redis
 	if err := d.rdb.Health(ctx); err != nil {
-		info.RedisStatus = "disconnected"
+		info.StorageStatus = "disconnected"
 	} else {
-		info.RedisStatus = "connected"
+		info.StorageStatus = "connected"
 	}
 
 	// Peer count
@@ -122,11 +124,12 @@ func (d *Dashboard) View() string {
 	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Machine ID:"), valueStyle.Render(d.info.MachineID)))
 	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Listen:"), valueStyle.Render(d.info.ListenAddr)))
 
-	redisStyle := successStyle
-	if d.info.RedisStatus != "connected" {
-		redisStyle = errorStyle
+	storageStyle := successStyle
+	if d.info.StorageStatus != "connected" {
+		storageStyle = errorStyle
 	}
-	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Redis:"), redisStyle.Render(d.info.RedisStatus)))
+	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Storage:"), valueStyle.Render(d.info.StorageBackend)))
+	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Backend:"), storageStyle.Render(d.info.StorageStatus)))
 	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Peers:"), valueStyle.Render(fmt.Sprintf("%d", d.info.PeerCount))))
 
 	// Sender: show connected listener

@@ -115,20 +115,19 @@ func serviceUninstall() error {
 	if cfgErr != nil {
 		cfg = config.DefaultConfig()
 	}
-	redisAddr := fmt.Sprintf("%s:%d", cfg.RedisAddr, cfg.RedisPort)
-	rdb, err := store.NewRedis(redisAddr, cfg.RedisPassword, cfg.RedisDB)
+	rdb, err := store.Open(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not connect to Redis at %s: %v\n", redisAddr, err)
-		fmt.Fprintln(os.Stderr, "  Relayra keys were NOT removed. Run 'redis-cli KEYS \"relayra:*\"' to check.")
+		fmt.Fprintf(os.Stderr, "Warning: could not open storage backend: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Relayra data was NOT removed from %s.\n", cfg.StorageBackend)
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		deleted, flushErr := rdb.FlushAll(ctx)
 		cancel()
 		rdb.Close()
 		if flushErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to flush Redis data: %v\n", flushErr)
+			fmt.Fprintf(os.Stderr, "Warning: failed to flush Relayra data: %v\n", flushErr)
 		} else {
-			fmt.Printf("Deleted %d Relayra keys from Redis.\n", deleted)
+			fmt.Printf("Deleted %d Relayra records from %s.\n", deleted, cfg.StorageBackend)
 		}
 	}
 

@@ -33,6 +33,10 @@ type Config struct {
 	ListenPort int    `env:"RELAYRA_LISTEN_PORT"`
 	PublicAddr string `env:"RELAYRA_PUBLIC_ADDR"` // External IP for pairing tokens
 
+	// Storage
+	StorageBackend string `env:"RELAYRA_STORAGE_BACKEND"`
+	SQLitePath     string `env:"RELAYRA_SQLITE_PATH"`
+
 	// Redis
 	RedisAddr     string `env:"RELAYRA_REDIS_ADDR"`
 	RedisPort     int    `env:"RELAYRA_REDIS_PORT"`
@@ -40,9 +44,15 @@ type Config struct {
 	RedisDB       int    `env:"RELAYRA_REDIS_DB"`
 
 	// Polling (Sender)
-	PollInterval   int `env:"RELAYRA_POLL_INTERVAL"`
-	PollBatchSize  int `env:"RELAYRA_POLL_BATCH_SIZE"`
-	RequestTimeout int `env:"RELAYRA_REQUEST_TIMEOUT"`
+	PollInterval   int  `env:"RELAYRA_POLL_INTERVAL"`
+	PollBatchSize  int  `env:"RELAYRA_POLL_BATCH_SIZE"`
+	RequestTimeout int  `env:"RELAYRA_REQUEST_TIMEOUT"`
+	LongPolling    bool `env:"RELAYRA_LONG_POLLING"`
+	LongPollWait   int  `env:"RELAYRA_LONG_POLL_WAIT"`
+	AsyncWorkers   int  `env:"RELAYRA_ASYNC_WORKERS"`
+
+	// Execution
+	AllowListenerExecution bool `env:"RELAYRA_ALLOW_LISTENER_EXECUTION"`
 
 	// Logging
 	LogLevel   string `env:"RELAYRA_LOG_LEVEL"`
@@ -57,20 +67,26 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		ListenAddr:        "0.0.0.0",
-		ListenPort:        10000 + rand.Intn(55535),
-		RedisAddr:         "127.0.0.1",
-		RedisPort:         6379,
-		RedisPassword:     "",
-		RedisDB:           0,
-		PollInterval:      5,
-		PollBatchSize:     10,
-		RequestTimeout:    30,
-		LogLevel:          "info",
-		LogDir:            "/opt/relayra/logs",
-		LogMaxDays:        7,
-		ResultTTL:         86400,
-		WebhookMaxRetries: 3,
+		ListenAddr:             "0.0.0.0",
+		ListenPort:             10000 + rand.Intn(55535),
+		StorageBackend:         "redis",
+		SQLitePath:             defaultSQLitePath(),
+		RedisAddr:              "127.0.0.1",
+		RedisPort:              6379,
+		RedisPassword:          "",
+		RedisDB:                0,
+		PollInterval:           5,
+		PollBatchSize:          10,
+		RequestTimeout:         30,
+		LongPolling:            true,
+		LongPollWait:           30,
+		AsyncWorkers:           4,
+		AllowListenerExecution: false,
+		LogLevel:               "info",
+		LogDir:                 "/opt/relayra/logs",
+		LogMaxDays:             7,
+		ResultTTL:              86400,
+		WebhookMaxRetries:      3,
 	}
 }
 
@@ -106,6 +122,8 @@ func Load() (*Config, error) {
 	cfg.ListenAddr = getEnvStr("RELAYRA_LISTEN_ADDR", cfg.ListenAddr)
 	cfg.ListenPort = getEnvInt("RELAYRA_LISTEN_PORT", cfg.ListenPort)
 	cfg.PublicAddr = getEnvStr("RELAYRA_PUBLIC_ADDR", cfg.PublicAddr)
+	cfg.StorageBackend = getEnvStr("RELAYRA_STORAGE_BACKEND", cfg.StorageBackend)
+	cfg.SQLitePath = getEnvStr("RELAYRA_SQLITE_PATH", cfg.SQLitePath)
 	cfg.RedisAddr = getEnvStr("RELAYRA_REDIS_ADDR", cfg.RedisAddr)
 	cfg.RedisPort = getEnvInt("RELAYRA_REDIS_PORT", cfg.RedisPort)
 	cfg.RedisPassword = getEnvStr("RELAYRA_REDIS_PASSWORD", cfg.RedisPassword)
@@ -113,6 +131,10 @@ func Load() (*Config, error) {
 	cfg.PollInterval = getEnvInt("RELAYRA_POLL_INTERVAL", cfg.PollInterval)
 	cfg.PollBatchSize = getEnvInt("RELAYRA_POLL_BATCH_SIZE", cfg.PollBatchSize)
 	cfg.RequestTimeout = getEnvInt("RELAYRA_REQUEST_TIMEOUT", cfg.RequestTimeout)
+	cfg.LongPolling = getEnvBool("RELAYRA_LONG_POLLING", cfg.LongPolling)
+	cfg.LongPollWait = getEnvInt("RELAYRA_LONG_POLL_WAIT", cfg.LongPollWait)
+	cfg.AsyncWorkers = getEnvInt("RELAYRA_ASYNC_WORKERS", cfg.AsyncWorkers)
+	cfg.AllowListenerExecution = getEnvBool("RELAYRA_ALLOW_LISTENER_EXECUTION", cfg.AllowListenerExecution)
 	cfg.LogLevel = getEnvStr("RELAYRA_LOG_LEVEL", cfg.LogLevel)
 	cfg.LogDir = getEnvStr("RELAYRA_LOG_DIR", cfg.LogDir)
 	cfg.LogMaxDays = getEnvInt("RELAYRA_LOG_MAX_DAYS", cfg.LogMaxDays)
@@ -146,6 +168,10 @@ func Save(cfg *Config) error {
 		fmt.Sprintf("RELAYRA_LISTEN_PORT=%d", cfg.ListenPort),
 		fmt.Sprintf("RELAYRA_PUBLIC_ADDR=%s", cfg.PublicAddr),
 		"",
+		"# Storage",
+		fmt.Sprintf("RELAYRA_STORAGE_BACKEND=%s", cfg.StorageBackend),
+		fmt.Sprintf("RELAYRA_SQLITE_PATH=%s", cfg.SQLitePath),
+		"",
 		"# Redis",
 		fmt.Sprintf("RELAYRA_REDIS_ADDR=%s", cfg.RedisAddr),
 		fmt.Sprintf("RELAYRA_REDIS_PORT=%d", cfg.RedisPort),
@@ -156,6 +182,12 @@ func Save(cfg *Config) error {
 		fmt.Sprintf("RELAYRA_POLL_INTERVAL=%d", cfg.PollInterval),
 		fmt.Sprintf("RELAYRA_POLL_BATCH_SIZE=%d", cfg.PollBatchSize),
 		fmt.Sprintf("RELAYRA_REQUEST_TIMEOUT=%d", cfg.RequestTimeout),
+		fmt.Sprintf("RELAYRA_LONG_POLLING=%t", cfg.LongPolling),
+		fmt.Sprintf("RELAYRA_LONG_POLL_WAIT=%d", cfg.LongPollWait),
+		fmt.Sprintf("RELAYRA_ASYNC_WORKERS=%d", cfg.AsyncWorkers),
+		"",
+		"# Execution",
+		fmt.Sprintf("RELAYRA_ALLOW_LISTENER_EXECUTION=%t", cfg.AllowListenerExecution),
 		"",
 		"# Logging",
 		fmt.Sprintf("RELAYRA_LOG_LEVEL=%s", cfg.LogLevel),
@@ -189,6 +221,11 @@ func (c *Config) Validate() error {
 	if c.Role != RoleListener && c.Role != RoleSender {
 		return fmt.Errorf("RELAYRA_ROLE must be 'listener' or 'sender', got '%s'", c.Role)
 	}
+	switch strings.ToLower(strings.TrimSpace(c.StorageBackend)) {
+	case "redis", "sqlite":
+	default:
+		return fmt.Errorf("RELAYRA_STORAGE_BACKEND must be 'redis' or 'sqlite', got '%s'", c.StorageBackend)
+	}
 	if c.ListenPort < 1 || c.ListenPort > 65535 {
 		return fmt.Errorf("RELAYRA_LISTEN_PORT must be between 1 and 65535, got %d", c.ListenPort)
 	}
@@ -203,6 +240,12 @@ func (c *Config) Validate() error {
 	}
 	if c.RequestTimeout < 1 {
 		return fmt.Errorf("RELAYRA_REQUEST_TIMEOUT must be >= 1 second, got %d", c.RequestTimeout)
+	}
+	if c.LongPollWait < 1 {
+		return fmt.Errorf("RELAYRA_LONG_POLL_WAIT must be >= 1 second, got %d", c.LongPollWait)
+	}
+	if c.AsyncWorkers < 1 {
+		return fmt.Errorf("RELAYRA_ASYNC_WORKERS must be >= 1, got %d", c.AsyncWorkers)
 	}
 	if c.ResultTTL < 1 {
 		return fmt.Errorf("RELAYRA_RESULT_TTL must be >= 1 second, got %d", c.ResultTTL)
@@ -243,4 +286,24 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return fallback
+}
+
+func defaultSQLitePath() string {
+	if _, err := os.Stat("/opt/relayra"); err == nil {
+		return "/opt/relayra/relayra.db"
+	}
+	dir, _ := os.Getwd()
+	return filepath.Join(dir, "relayra.db")
 }

@@ -15,7 +15,7 @@ import (
 
 // TokensView manages API tokens.
 type TokensView struct {
-	rdb        *store.Redis
+	rdb        store.Backend
 	tokens     []*models.APIToken
 	cursor     int
 	err        error
@@ -48,7 +48,7 @@ type tokenDeletedMsg struct {
 }
 
 // NewTokensView creates a new API tokens management view.
-func NewTokensView(rdb *store.Redis) *TokensView {
+func NewTokensView(rdb store.Backend) *TokensView {
 	return &TokensView{rdb: rdb}
 }
 

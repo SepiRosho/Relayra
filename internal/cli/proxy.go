@@ -1,13 +1,19 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/relayra/relayra/internal/config"
+	"github.com/relayra/relayra/internal/crypto"
 	"github.com/relayra/relayra/internal/logger"
+	"github.com/relayra/relayra/internal/models"
 	proxyPkg "github.com/relayra/relayra/internal/proxy"
 	"github.com/relayra/relayra/internal/store"
 	"github.com/spf13/cobra"
@@ -17,6 +23,11 @@ var proxyCmd = &cobra.Command{
 	Use:   "proxy",
 	Short: "(Sender) Manage proxies",
 }
+
+var (
+	proxyLongPollSamples int
+	proxyLongPollWait    int
+)
 
 var proxyAddCmd = &cobra.Command{
 	Use:   "add [url]",
@@ -185,15 +196,70 @@ var proxyResetCooldownCmd = &cobra.Command{
 	},
 }
 
+var proxyTestLongPollCmd = &cobra.Command{
+	Use:   "test-longpoll [url]",
+	Short: "Measure how long long-poll connections stay open through proxies",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, rdb, err := loadSenderConfig()
+		if err != nil {
+			return err
+		}
+		defer rdb.Close()
+
+		ctx := logger.WithComponent(context.Background(), "proxy")
+		mgr := proxyPkg.NewManager(rdb)
+		listener, err := rdb.GetListenerInfo(ctx)
+		if err != nil || listener == nil {
+			return fmt.Errorf("no listener paired. Run 'relayra pair connect <token>' first")
+		}
+
+		var proxies []string
+		if len(args) == 1 {
+			proxies = []string{args[0]}
+		} else {
+			list, err := mgr.List(ctx)
+			if err != nil {
+				return err
+			}
+			for _, p := range list {
+				proxies = append(proxies, p.URL)
+			}
+		}
+
+		if len(proxies) == 0 {
+			fmt.Println("No proxies configured.")
+			return nil
+		}
+
+		fmt.Printf("Long-poll reliability test: %d sample(s), %ds requested hold\n\n", proxyLongPollSamples, proxyLongPollWait)
+		for _, proxyURL := range proxies {
+			avg, successCount, errCount := testLongPollProxy(ctx, cfg, mgr, listener, proxyURL, proxyLongPollWait, proxyLongPollSamples)
+			fmt.Printf("%s\n", proxyURL)
+			fmt.Printf("  Successful samples: %d/%d\n", successCount, proxyLongPollSamples)
+			if successCount > 0 {
+				fmt.Printf("  Average hold: %.2fs\n", avg)
+			}
+			fmt.Printf("  Errors: %d\n\n", errCount)
+		}
+
+		return nil
+	},
+}
+
 func init() {
 	proxyCmd.AddCommand(proxyAddCmd)
 	proxyCmd.AddCommand(proxyRemoveCmd)
 	proxyCmd.AddCommand(proxyListCmd)
 	proxyCmd.AddCommand(proxyTestCmd)
+	proxyCmd.AddCommand(proxyTestLongPollCmd)
 	proxyCmd.AddCommand(proxyResetCooldownCmd)
+
+	proxyTestLongPollCmd.Flags().IntVar(&proxyLongPollSamples, "samples", 3, "Number of long-poll samples to run")
+	proxyTestLongPollCmd.Flags().IntVar(&proxyLongPollWait, "wait", 30, "Requested long-poll hold duration in seconds")
 }
 
-func loadSenderConfig() (*config.Config, *store.Redis, error) {
+func loadSenderConfig() (*config.Config, store.Backend, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -205,12 +271,78 @@ func loadSenderConfig() (*config.Config, *store.Redis, error) {
 
 	logger.SetupStdoutOnly(logger.ParseLevel(cfg.LogLevel))
 
-	rdb, err := store.NewRedis(cfg.RedisURL(), cfg.RedisPassword, cfg.RedisDB)
+	rdb, err := store.Open(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to Redis: %w", err)
+		return nil, nil, fmt.Errorf("open storage backend: %w", err)
 	}
 
 	_ = strings.TrimSpace("") // suppress unused
 	_ = slog.Default()
 	return cfg, rdb, nil
+}
+
+func testLongPollProxy(ctx context.Context, cfg *config.Config, mgr *proxyPkg.Manager, listener *models.Peer, proxyURL string, waitSeconds int, samples int) (float64, int, int) {
+	var total float64
+	var successCount int
+	var errCount int
+
+	transport, err := mgr.TransportForURL(proxyURL)
+	if err != nil {
+		return 0, 0, samples
+	}
+
+	timeoutSeconds := waitSeconds + 15
+	if timeoutSeconds < cfg.RequestTimeout {
+		timeoutSeconds = cfg.RequestTimeout
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   time.Duration(timeoutSeconds) * time.Second,
+	}
+
+	for i := 0; i < samples; i++ {
+		payloadUp := models.PollPayloadUp{}
+		ciphertext, nonce, timestamp, err := crypto.EncryptJSON(listener.EncryptionKey, &payloadUp)
+		if err != nil {
+			errCount++
+			continue
+		}
+
+		pollReq := models.PollRequest{
+			PeerID:      listener.ID,
+			Nonce:       nonce,
+			Timestamp:   timestamp,
+			Payload:     ciphertext,
+			WaitSeconds: waitSeconds,
+		}
+
+		reqBody, _ := json.Marshal(pollReq)
+		pollURL := fmt.Sprintf("http://%s/api/v1/poll", listener.Address)
+		start := time.Now()
+		resp, err := client.Post(pollURL, "application/json", bytes.NewReader(reqBody))
+		heldFor := time.Since(start).Seconds()
+		if err != nil {
+			errCount++
+			fmt.Printf("  sample %d: failed after %.2fs (%v)\n", i+1, heldFor, err)
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			errCount++
+			fmt.Printf("  sample %d: HTTP %d after %.2fs\n", i+1, resp.StatusCode, heldFor)
+			continue
+		}
+
+		successCount++
+		total += heldFor
+		fmt.Printf("  sample %d: held %.2fs\n", i+1, heldFor)
+	}
+
+	if successCount == 0 {
+		return 0, 0, errCount
+	}
+
+	return total / float64(successCount), successCount, errCount
 }

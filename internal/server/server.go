@@ -16,7 +16,7 @@ import (
 )
 
 // Run starts the Listener HTTP server.
-func Run(ctx context.Context, cfg *config.Config, rdb *store.Redis) error {
+func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 	ctx = logger.WithComponent(ctx, "server")
 
 	// Log startup diagnostics

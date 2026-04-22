@@ -17,11 +17,11 @@ var resetForce bool
 
 var resetCmd = &cobra.Command{
 	Use:   "reset",
-	Short: "Delete all Relayra data from Redis",
-	Long:  "Removes all relayra:* keys from Redis. Peers, proxies, queued requests, and results will be permanently deleted.",
+	Short: "Delete all Relayra data from the configured storage backend",
+	Long:  "Removes Relayra data from the configured storage backend. Peers, proxies, queued requests, and results will be permanently deleted.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if !resetForce {
-			fmt.Println("This will permanently delete ALL Relayra data from Redis:")
+			fmt.Printf("This will permanently delete ALL Relayra data from %s:\n", cfgStorageName())
 			fmt.Println("  - Registered peers")
 			fmt.Println("  - Proxy list and status")
 			fmt.Println("  - Pending requests and results")
@@ -45,10 +45,9 @@ var resetCmd = &cobra.Command{
 			cfg = config.DefaultConfig()
 		}
 
-		redisAddr := fmt.Sprintf("%s:%d", cfg.RedisAddr, cfg.RedisPort)
-		rdb, err := store.NewRedis(redisAddr, cfg.RedisPassword, cfg.RedisDB)
+		rdb, err := store.Open(cfg)
 		if err != nil {
-			return fmt.Errorf("connect to Redis at %s: %w", redisAddr, err)
+			return fmt.Errorf("open storage backend: %w", err)
 		}
 		defer rdb.Close()
 
@@ -57,14 +56,22 @@ var resetCmd = &cobra.Command{
 
 		deleted, err := rdb.FlushAll(ctx)
 		if err != nil {
-			return fmt.Errorf("flush Redis data: %w", err)
+			return fmt.Errorf("flush Relayra data: %w", err)
 		}
 
-		fmt.Printf("Deleted %d Relayra keys from Redis.\n", deleted)
+		fmt.Printf("Deleted %d Relayra records from %s.\n", deleted, cfg.StorageBackend)
 		return nil
 	},
 }
 
 func init() {
 	resetCmd.Flags().BoolVarP(&resetForce, "force", "f", false, "Skip confirmation prompt")
+}
+
+func cfgStorageName() string {
+	cfg, err := config.Load()
+	if err != nil || cfg.StorageBackend == "" {
+		return "storage"
+	}
+	return cfg.StorageBackend
 }

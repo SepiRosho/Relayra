@@ -24,7 +24,7 @@ type webhookPayload struct {
 
 // Deliver sends a result to a webhook URL with retry logic.
 // Retries up to maxRetries times with exponential backoff: 5s, 15s, 45s.
-func Deliver(ctx context.Context, rdb *store.Redis, webhookURL string, requestID string, result *models.RelayResult, maxRetries int) {
+func Deliver(ctx context.Context, rdb store.Backend, webhookURL string, requestID string, result *models.RelayResult, maxRetries int) {
 	ctx = logger.WithComponent(ctx, "webhook")
 	ctx = logger.WithRequestID(ctx, requestID)
 

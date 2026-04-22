@@ -66,7 +66,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 // apiTokenAuthMiddleware validates Bearer tokens on protected API endpoints.
 // Endpoints: /api/v1/relay, /api/v1/result/*, /api/v1/peers
 // Exempt: /health, /api/v1/poll (uses peer encryption), /api/v1/pair (uses pairing token)
-func apiTokenAuthMiddleware(rdb *store.Redis) func(http.Handler) http.Handler {
+func apiTokenAuthMiddleware(rdb store.Backend) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path

@@ -31,7 +31,7 @@ type App struct {
 	instance  string
 	quitting  bool
 	cfg       *config.Config
-	rdb       *store.Redis
+	rdb       store.Backend
 	// Sub-views
 	dashboard    *Dashboard
 	peersView    *PeersView
@@ -42,7 +42,7 @@ type App struct {
 }
 
 // NewApp creates a new TUI app model.
-func NewApp(cfg *config.Config, rdb *store.Redis) *App {
+func NewApp(cfg *config.Config, rdb store.Backend) *App {
 	role := string(cfg.Role)
 	instance := cfg.InstanceName
 	items := []string{
@@ -185,7 +185,7 @@ func (a *App) selectMenuItem() (tea.Model, tea.Cmd) {
 		return a, a.dashboard.Init()
 	case "Manage Peers":
 		a.screen = ScreenPeers
-		a.peersView = NewPeersView(a.rdb)
+		a.peersView = NewPeersView(a.cfg, a.rdb)
 		return a, a.peersView.Init()
 	case "Manage Proxies":
 		a.screen = ScreenProxies
@@ -282,7 +282,7 @@ func (a *App) viewMenu() string {
 }
 
 // RunTUI starts the main TUI application.
-func RunTUI(cfg *config.Config, rdb *store.Redis) error {
+func RunTUI(cfg *config.Config, rdb store.Backend) error {
 	app := NewApp(cfg, rdb)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	_, err := p.Run()

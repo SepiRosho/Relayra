@@ -6,12 +6,14 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/store"
 )
 
 // PeersView is the Bubble Tea model for listing peers.
 type PeersView struct {
-	rdb        *store.Redis
+	cfg        *config.Config
+	rdb        store.Backend
 	peers      []peerRow
 	cursor     int
 	err        error
@@ -21,10 +23,11 @@ type PeersView struct {
 }
 
 type peerRow struct {
-	ID        string
-	Name      string
-	MachineID string
-	LastSeen  string
+	ID         string
+	Name       string
+	MachineID  string
+	LastSeen   string
+	IsListener bool
 }
 
 type peersLoadedMsg struct {
@@ -33,8 +36,8 @@ type peersLoadedMsg struct {
 }
 
 // NewPeersView creates a new peers list view.
-func NewPeersView(rdb *store.Redis) *PeersView {
-	return &PeersView{rdb: rdb}
+func NewPeersView(cfg *config.Config, rdb store.Backend) *PeersView {
+	return &PeersView{cfg: cfg, rdb: rdb}
 }
 
 func (pv *PeersView) Init() tea.Cmd {
@@ -42,6 +45,26 @@ func (pv *PeersView) Init() tea.Cmd {
 }
 
 func (pv *PeersView) loadPeers() tea.Msg {
+	if pv.cfg.Role == config.RoleSender {
+		listener, err := pv.rdb.GetListenerInfo(context.Background())
+		if err != nil {
+			return peersLoadedMsg{err: err}
+		}
+		if listener == nil {
+			return peersLoadedMsg{}
+		}
+
+		return peersLoadedMsg{
+			peers: []peerRow{{
+				ID:         listener.ID,
+				Name:       listener.Name,
+				MachineID:  listener.MachineID,
+				LastSeen:   "paired listener",
+				IsListener: true,
+			}},
+		}
+	}
+
 	list, err := pv.rdb.ListPeers(context.Background())
 	if err != nil {
 		return peersLoadedMsg{err: err}
@@ -102,7 +125,7 @@ func (pv *PeersView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(pv.peers) > 0 && pv.cursor < len(pv.peers) {
 				peer := pv.peers[pv.cursor]
-				pv.detail = NewPeerDetailView(pv.rdb, peer.ID)
+				pv.detail = NewPeerDetailView(pv.cfg, pv.rdb, peer.ID, peer.IsListener)
 				pv.showDetail = true
 				return pv, pv.detail.Init()
 			}
@@ -133,6 +156,13 @@ func (pv *PeersView) View() string {
 	}
 
 	if len(pv.peers) == 0 {
+		if pv.cfg.Role == config.RoleSender {
+			b.WriteString(dimStyle.Render("  No listener paired yet."))
+			b.WriteString("\n\n")
+			b.WriteString(dimStyle.Render("  Use 'relayra pair connect <token>' to connect to a listener."))
+			return b.String()
+		}
+
 		b.WriteString(dimStyle.Render("  No peers connected yet."))
 		b.WriteString("\n\n")
 		b.WriteString(dimStyle.Render("  Use 'relayra pair generate' to create a pairing token."))

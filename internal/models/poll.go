@@ -3,10 +3,11 @@ package models
 // PollRequest is sent by the Sender to the Listener during each poll cycle.
 // The Payload is encrypted with AES-256-GCM before transmission.
 type PollRequest struct {
-	PeerID    string `json:"peer_id"`
-	Nonce     string `json:"nonce"`     // base64-encoded nonce
-	Timestamp int64  `json:"timestamp"` // Unix timestamp for replay protection
-	Payload   string `json:"payload"`   // base64-encoded encrypted PollPayloadUp
+	PeerID      string `json:"peer_id"`
+	Nonce       string `json:"nonce"`     // base64-encoded nonce
+	Timestamp   int64  `json:"timestamp"` // Unix timestamp for replay protection
+	Payload     string `json:"payload"`   // base64-encoded encrypted PollPayloadUp
+	WaitSeconds int    `json:"wait_seconds,omitempty"`
 }
 
 // PollResponse is returned by the Listener to the Sender.

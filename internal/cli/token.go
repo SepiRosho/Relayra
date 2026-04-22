@@ -128,7 +128,7 @@ func init() {
 	tokenCmd.AddCommand(tokenRevokeCmd)
 }
 
-func loadListenerConfig() (*config.Config, *store.Redis, error) {
+func loadListenerConfig() (*config.Config, store.Backend, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -140,9 +140,9 @@ func loadListenerConfig() (*config.Config, *store.Redis, error) {
 
 	logger.SetupStdoutOnly(logger.ParseLevel(cfg.LogLevel))
 
-	rdb, err := store.NewRedis(cfg.RedisURL(), cfg.RedisPassword, cfg.RedisDB)
+	rdb, err := store.Open(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to Redis: %w", err)
+		return nil, nil, fmt.Errorf("open storage backend: %w", err)
 	}
 
 	return cfg, rdb, nil

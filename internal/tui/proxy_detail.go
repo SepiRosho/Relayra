@@ -14,7 +14,7 @@ import (
 // ProxyDetailView shows details of a single proxy with management options.
 type ProxyDetailView struct {
 	manager   *proxy.Manager
-	rdb       *store.Redis
+	rdb       store.Backend
 	proxyURL  string
 	info      proxy.ProxyInfo
 	err       error
@@ -60,7 +60,7 @@ type proxyUpdatedMsg struct {
 }
 
 // NewProxyDetailView creates a detail view for a specific proxy.
-func NewProxyDetailView(rdb *store.Redis, proxyURL string) *ProxyDetailView {
+func NewProxyDetailView(rdb store.Backend, proxyURL string) *ProxyDetailView {
 	mgr := proxy.NewManager(rdb)
 
 	pd := &ProxyDetailView{

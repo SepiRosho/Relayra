@@ -13,7 +13,7 @@ import (
 // ProxyView is the Bubble Tea model for managing proxies.
 type ProxyView struct {
 	manager    *proxy.Manager
-	rdb        *store.Redis
+	rdb        store.Backend
 	proxies    []proxyRow
 	cursor     int
 	err        error
@@ -35,7 +35,7 @@ type proxiesLoadedMsg struct {
 }
 
 // NewProxyView creates a new proxy management view.
-func NewProxyView(rdb *store.Redis) *ProxyView {
+func NewProxyView(rdb store.Backend) *ProxyView {
 	mgr := proxy.NewManager(rdb)
 	return &ProxyView{manager: mgr, rdb: rdb}
 }

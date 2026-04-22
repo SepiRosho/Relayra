@@ -42,9 +42,9 @@ var pairGenerateCmd = &cobra.Command{
 		logger.SetupStdoutOnly(logger.ParseLevel(cfg.LogLevel))
 		ctx := logger.WithComponent(context.Background(), "pairing")
 
-		rdb, err := store.NewRedis(cfg.RedisURL(), cfg.RedisPassword, cfg.RedisDB)
+		rdb, err := store.Open(cfg)
 		if err != nil {
-			return fmt.Errorf("connect to Redis: %w", err)
+			return fmt.Errorf("open storage backend: %w", err)
 		}
 		defer rdb.Close()
 
@@ -106,9 +106,9 @@ var pairConnectCmd = &cobra.Command{
 		logger.SetupStdoutOnly(logger.ParseLevel(cfg.LogLevel))
 		ctx := logger.WithComponent(context.Background(), "pairing")
 
-		rdb, err := store.NewRedis(cfg.RedisURL(), cfg.RedisPassword, cfg.RedisDB)
+		rdb, err := store.Open(cfg)
 		if err != nil {
-			return fmt.Errorf("connect to Redis: %w", err)
+			return fmt.Errorf("open storage backend: %w", err)
 		}
 		defer rdb.Close()
 

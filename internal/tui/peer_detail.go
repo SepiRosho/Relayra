@@ -7,22 +7,25 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/models"
 	"github.com/relayra/relayra/internal/store"
 )
 
 // PeerDetailView shows details of a single peer with management options.
 type PeerDetailView struct {
-	rdb       *store.Redis
-	peer      *models.Peer
-	peerID    string
-	err       error
-	ready     bool
-	actionIdx int
-	actions   []string
-	confirm   bool
-	deleted   bool
-	queueSize int64
+	cfg        *config.Config
+	rdb        store.Backend
+	peer       *models.Peer
+	peerID     string
+	isListener bool
+	err        error
+	ready      bool
+	actionIdx  int
+	actions    []string
+	confirm    bool
+	deleted    bool
+	queueSize  int64
 }
 
 type peerDetailMsg struct {
@@ -36,14 +39,18 @@ type peerDeletedMsg struct {
 }
 
 // NewPeerDetailView creates a detail view for a specific peer.
-func NewPeerDetailView(rdb *store.Redis, peerID string) *PeerDetailView {
+func NewPeerDetailView(cfg *config.Config, rdb store.Backend, peerID string, isListener bool) *PeerDetailView {
+	actions := []string{"Refresh", "Delete Peer"}
+	if isListener {
+		actions = []string{"Refresh"}
+	}
+
 	return &PeerDetailView{
-		rdb:    rdb,
-		peerID: peerID,
-		actions: []string{
-			"Refresh",
-			"Delete Peer",
-		},
+		cfg:        cfg,
+		rdb:        rdb,
+		peerID:     peerID,
+		isListener: isListener,
+		actions:    actions,
 	}
 }
 
@@ -53,21 +60,36 @@ func (pd *PeerDetailView) Init() tea.Cmd {
 
 func (pd *PeerDetailView) loadPeer() tea.Msg {
 	ctx := context.Background()
-	peer, err := pd.rdb.GetPeer(ctx, pd.peerID)
+	var (
+		peer *models.Peer
+		err  error
+	)
+	if pd.isListener {
+		peer, err = pd.rdb.GetListenerInfo(ctx)
+	} else {
+		peer, err = pd.rdb.GetPeer(ctx, pd.peerID)
+	}
 	if err != nil {
 		return peerDetailMsg{err: err}
 	}
 
 	var queueSize int64
-	qLen, err := pd.rdb.Client.LLen(ctx, "relayra:queue:"+pd.peerID).Result()
-	if err == nil {
-		queueSize = qLen
+	if pd.isListener {
+		queueSize, _ = pd.rdb.PendingResultsCount(ctx)
+	} else {
+		qLen, err := pd.rdb.QueueLength(ctx, pd.peerID)
+		if err == nil {
+			queueSize = qLen
+		}
 	}
 
 	return peerDetailMsg{peer: peer, queueSize: queueSize}
 }
 
 func (pd *PeerDetailView) deletePeer() tea.Msg {
+	if pd.isListener {
+		return peerDeletedMsg{}
+	}
 	err := pd.rdb.DeletePeer(context.Background(), pd.peerID)
 	return peerDeletedMsg{err: err}
 }
@@ -185,7 +207,11 @@ func (pd *PeerDetailView) View() string {
 		lastSeenStr += " (active)"
 	}
 	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Last Seen:"), ageStyle.Render(lastSeenStr)))
-	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Queue Size:"), valueStyle.Render(fmt.Sprintf("%d", pd.queueSize))))
+	queueLabel := "Queue Size:"
+	if pd.isListener && pd.cfg.Role == config.RoleSender {
+		queueLabel = "Pending Results:"
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render(queueLabel), valueStyle.Render(fmt.Sprintf("%d", pd.queueSize))))
 
 	b.WriteString("\n")
 

@@ -7,6 +7,7 @@ type RelayRequest struct {
 	ID            string        `json:"id"`
 	DestinationID string        `json:"destination_peer_id"`
 	WebhookURL    string        `json:"webhook_url,omitempty"`
+	Async         bool          `json:"async,omitempty"`
 	Request       HTTPRequest   `json:"request"`
 	Status        RequestStatus `json:"status"`
 	CreatedAt     time.Time     `json:"created_at"`
