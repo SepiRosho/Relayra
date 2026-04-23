@@ -21,6 +21,8 @@ import (
 	"github.com/relayra/relayra/internal/store"
 )
 
+const activeWorkPollInterval = 250 * time.Millisecond
+
 // Run starts the Sender polling loop.
 func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 	ctx = logger.WithComponent(ctx, "poller")
@@ -76,6 +78,11 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 
 			if success {
 				failureBackoff = time.Second
+				if dispatcher.InFlight() > 0 {
+					if !sleepWithCancel(ctx, sigCh, activeWorkPollInterval) {
+						return nil
+					}
+				}
 				continue
 			}
 
@@ -113,7 +120,12 @@ func doPollCycle(ctx context.Context, cfg *config.Config, rdb store.Backend,
 	listenerInfo *models.Peer, proxyMgr *proxy.Manager, dispatcher *dispatcher, ackRequestIDs []string) ([]string, bool) {
 
 	start := time.Now()
-	slog.InfoContext(ctx, "poll cycle starting", "pending_acks", len(ackRequestIDs))
+	waitSeconds := requestedPollWait(cfg, dispatcher)
+	slog.InfoContext(ctx, "poll cycle starting",
+		"pending_acks", len(ackRequestIDs),
+		"wait_seconds", waitSeconds,
+		"in_flight", dispatcher.InFlight(),
+	)
 
 	// Get pending results to send back
 	results, err := rdb.PopResults(ctx, cfg.PollBatchSize)
@@ -147,7 +159,7 @@ func doPollCycle(ctx context.Context, cfg *config.Config, rdb store.Backend,
 		Nonce:       nonce,
 		Timestamp:   timestamp,
 		Payload:     ciphertext,
-		WaitSeconds: longPollWait(cfg),
+		WaitSeconds: waitSeconds,
 	}
 
 	reqBody, _ := json.Marshal(pollReq)
@@ -268,8 +280,11 @@ func truncateStr(s string, maxLen int) string {
 	return s
 }
 
-func longPollWait(cfg *config.Config) int {
+func requestedPollWait(cfg *config.Config, dispatcher *dispatcher) int {
 	if !cfg.LongPolling {
+		return 0
+	}
+	if dispatcher.InFlight() > 0 {
 		return 0
 	}
 	return cfg.LongPollWait

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/logger"
@@ -18,6 +19,7 @@ type dispatcher struct {
 	asyncSem chan struct{}
 	serialCh chan models.RelayRequest
 	wg       sync.WaitGroup
+	inFlight atomic.Int64
 }
 
 func newDispatcher(cfg *config.Config, rdb store.Backend) *dispatcher {
@@ -42,6 +44,8 @@ func newDispatcher(cfg *config.Config, rdb store.Backend) *dispatcher {
 }
 
 func (d *dispatcher) Dispatch(_ context.Context, req models.RelayRequest) {
+	d.inFlight.Add(1)
+
 	if req.Async {
 		d.wg.Add(1)
 		go func() {
@@ -60,6 +64,8 @@ func (d *dispatcher) Dispatch(_ context.Context, req models.RelayRequest) {
 }
 
 func (d *dispatcher) execute(ctx context.Context, req *models.RelayRequest) {
+	defer d.inFlight.Add(-1)
+
 	slog.InfoContext(ctx, "dispatching request for execution",
 		"url", req.Request.URL,
 		"method", req.Request.Method,
@@ -70,6 +76,10 @@ func (d *dispatcher) execute(ctx context.Context, req *models.RelayRequest) {
 	if err := d.rdb.PushResult(ctx, result); err != nil {
 		slog.ErrorContext(ctx, "failed to store result locally", "error", err)
 	}
+}
+
+func (d *dispatcher) InFlight() int64 {
+	return d.inFlight.Load()
 }
 
 func (d *dispatcher) Close() {
