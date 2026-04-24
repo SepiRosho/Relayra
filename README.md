@@ -1,5 +1,9 @@
 # Relayra
 
+<p align="center">
+  <img src="logo.png" alt="Relayra logo" width="220">
+</p>
+
 <p>
   <img src="https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.26+">
   <img src="https://img.shields.io/badge/platform-linux%2Famd64-2ea44f" alt="Linux amd64">
