@@ -154,7 +154,8 @@ Listener-side execution is supported when enabled (`destination_peer_id`: `liste
 | Add/list proxies (sender) | `relayra proxy add <url>` / `relayra proxy list` |
 | Test long-poll behavior via proxy | `relayra proxy test-longpoll --samples 3 --wait 30` |
 | Create API token (listener) | `relayra token create my-app` |
-| Manage service | `relayra service [install|start|stop|restart|status|uninstall]` |
+| Manage service | `relayra service <command>` |
+|  | `install`, `start`, `stop`, `restart`, `status`, `uninstall` |
 | View runtime logs | `relayra logs` |
 | Reset all Relayra data | `relayra reset --force` |
 
