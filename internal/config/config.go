@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -18,6 +19,12 @@ type Role string
 const (
 	RoleListener Role = "listener"
 	RoleSender   Role = "sender"
+)
+
+const (
+	TransportModeInterval = "interval"
+	TransportModeLongPoll = "long-poll"
+	TransportModeWebSocket = "websocket"
 )
 
 // Config holds all configuration for a Relayra instance.
@@ -45,12 +52,14 @@ type Config struct {
 	RedisDB       int    `env:"RELAYRA_REDIS_DB"`
 
 	// Polling (Sender)
-	PollInterval   int  `env:"RELAYRA_POLL_INTERVAL"`
-	PollBatchSize  int  `env:"RELAYRA_POLL_BATCH_SIZE"`
-	RequestTimeout int  `env:"RELAYRA_REQUEST_TIMEOUT"`
-	LongPolling    bool `env:"RELAYRA_LONG_POLLING"`
-	LongPollWait   int  `env:"RELAYRA_LONG_POLL_WAIT"`
-	AsyncWorkers   int  `env:"RELAYRA_ASYNC_WORKERS"`
+	PollInterval          int    `env:"RELAYRA_POLL_INTERVAL"`
+	PollBatchSize         int    `env:"RELAYRA_POLL_BATCH_SIZE"`
+	RequestTimeout        int    `env:"RELAYRA_REQUEST_TIMEOUT"`
+	LongPolling           bool   `env:"RELAYRA_LONG_POLLING"`
+	LongPollWait          int    `env:"RELAYRA_LONG_POLL_WAIT"`
+	AsyncWorkers          int    `env:"RELAYRA_ASYNC_WORKERS"`
+	TransportMode         string `env:"RELAYRA_TRANSPORT_MODE"`
+	ProxyCooldownSeconds  int    `env:"RELAYRA_PROXY_COOLDOWN_SECONDS"`
 
 	// Execution
 	AllowListenerExecution bool `env:"RELAYRA_ALLOW_LISTENER_EXECUTION"`
@@ -82,6 +91,8 @@ func DefaultConfig() *Config {
 		LongPolling:            true,
 		LongPollWait:           30,
 		AsyncWorkers:           4,
+		TransportMode:          TransportModeLongPoll,
+		ProxyCooldownSeconds:   300,
 		AllowListenerExecution: false,
 		LogLevel:               "info",
 		LogDir:                 "/opt/relayra/logs",
@@ -135,6 +146,15 @@ func Load() (*Config, error) {
 	cfg.LongPolling = getEnvBool("RELAYRA_LONG_POLLING", cfg.LongPolling)
 	cfg.LongPollWait = getEnvInt("RELAYRA_LONG_POLL_WAIT", cfg.LongPollWait)
 	cfg.AsyncWorkers = getEnvInt("RELAYRA_ASYNC_WORKERS", cfg.AsyncWorkers)
+	cfg.TransportMode = normalizeTransportMode(getEnvStr("RELAYRA_TRANSPORT_MODE", cfg.TransportMode))
+	if cfg.TransportMode == "" {
+		if cfg.LongPolling {
+			cfg.TransportMode = TransportModeLongPoll
+		} else {
+			cfg.TransportMode = TransportModeInterval
+		}
+	}
+	cfg.ProxyCooldownSeconds = getEnvInt("RELAYRA_PROXY_COOLDOWN_SECONDS", cfg.ProxyCooldownSeconds)
 	cfg.AllowListenerExecution = getEnvBool("RELAYRA_ALLOW_LISTENER_EXECUTION", cfg.AllowListenerExecution)
 	cfg.LogLevel = getEnvStr("RELAYRA_LOG_LEVEL", cfg.LogLevel)
 	cfg.LogDir = getEnvStr("RELAYRA_LOG_DIR", cfg.LogDir)
@@ -152,6 +172,9 @@ func Save(cfg *Config) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create config dir %s: %w", dir, err)
 	}
+
+	mode := cfg.NormalizedTransportMode()
+	longPolling := mode == TransportModeLongPoll
 
 	lines := []string{
 		"# Relayra Configuration",
@@ -183,9 +206,11 @@ func Save(cfg *Config) error {
 		fmt.Sprintf("RELAYRA_POLL_INTERVAL=%d", cfg.PollInterval),
 		fmt.Sprintf("RELAYRA_POLL_BATCH_SIZE=%d", cfg.PollBatchSize),
 		fmt.Sprintf("RELAYRA_REQUEST_TIMEOUT=%d", cfg.RequestTimeout),
-		fmt.Sprintf("RELAYRA_LONG_POLLING=%t", cfg.LongPolling),
+		fmt.Sprintf("RELAYRA_TRANSPORT_MODE=%s", mode),
+		fmt.Sprintf("RELAYRA_LONG_POLLING=%t", longPolling),
 		fmt.Sprintf("RELAYRA_LONG_POLL_WAIT=%d", cfg.LongPollWait),
 		fmt.Sprintf("RELAYRA_ASYNC_WORKERS=%d", cfg.AsyncWorkers),
+		fmt.Sprintf("RELAYRA_PROXY_COOLDOWN_SECONDS=%d", cfg.ProxyCooldownSeconds),
 		"",
 		"# Execution",
 		fmt.Sprintf("RELAYRA_ALLOW_LISTENER_EXECUTION=%t", cfg.AllowListenerExecution),
@@ -248,6 +273,14 @@ func (c *Config) Validate() error {
 	if c.AsyncWorkers < 1 {
 		return fmt.Errorf("RELAYRA_ASYNC_WORKERS must be >= 1, got %d", c.AsyncWorkers)
 	}
+	switch c.NormalizedTransportMode() {
+	case TransportModeInterval, TransportModeLongPoll, TransportModeWebSocket:
+	default:
+		return fmt.Errorf("RELAYRA_TRANSPORT_MODE must be 'interval', 'long-poll', or 'websocket', got '%s'", c.TransportMode)
+	}
+	if c.ProxyCooldownSeconds < 1 {
+		return fmt.Errorf("RELAYRA_PROXY_COOLDOWN_SECONDS must be >= 1 second, got %d", c.ProxyCooldownSeconds)
+	}
 	if c.ResultTTL < 1 {
 		return fmt.Errorf("RELAYRA_RESULT_TTL must be >= 1 second, got %d", c.ResultTTL)
 	}
@@ -309,14 +342,34 @@ func defaultSQLitePath() string {
 	return filepath.Join(dir, "relayra.db")
 }
 
+// NormalizedTransportMode returns the validated sender transport mode.
+func (c *Config) NormalizedTransportMode() string {
+	mode := normalizeTransportMode(c.TransportMode)
+	if mode == "" {
+		if c.LongPolling {
+			return TransportModeLongPoll
+		}
+		return TransportModeInterval
+	}
+	return mode
+}
+
+// ProxyCooldown returns the configured proxy cooldown as a duration.
+func (c *Config) ProxyCooldown() time.Duration {
+	return time.Duration(c.ProxyCooldownSeconds) * time.Second
+}
+
 // Capabilities reports the current instance feature support for pairing and visibility.
 func (c *Config) Capabilities() []string {
 	caps := []string{
 		"relay-v1",
 		"async",
 	}
-	if c.LongPolling {
+	switch c.NormalizedTransportMode() {
+	case TransportModeLongPoll:
 		caps = append(caps, "long-poll")
+	case TransportModeWebSocket:
+		caps = append(caps, "websocket", "long-poll-fallback")
 	}
 	if strings.EqualFold(c.StorageBackend, "sqlite") {
 		caps = append(caps, "sqlite")
@@ -337,4 +390,17 @@ func (c *Config) Capabilities() []string {
 
 	slices.Sort(caps)
 	return caps
+}
+
+func normalizeTransportMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "interval":
+		return strings.ToLower(strings.TrimSpace(v))
+	case "longpoll", "long-poll", "long_poll":
+		return TransportModeLongPoll
+	case "websocket", "ws":
+		return TransportModeWebSocket
+	default:
+		return strings.ToLower(strings.TrimSpace(v))
+	}
 }

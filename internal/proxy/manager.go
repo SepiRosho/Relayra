@@ -15,18 +15,21 @@ import (
 )
 
 const (
-	maxFailCount     = 3
-	cooldownDuration = 5 * time.Minute
+	maxFailCount = 3
 )
 
 // Manager handles proxy storage, health checking, and rotation.
 type Manager struct {
-	rdb store.Backend
+	rdb      store.Backend
+	cooldown time.Duration
 }
 
 // NewManager creates a new proxy Manager.
-func NewManager(rdb store.Backend) *Manager {
-	return &Manager{rdb: rdb}
+func NewManager(rdb store.Backend, cooldown time.Duration) *Manager {
+	if cooldown <= 0 {
+		cooldown = 5 * time.Minute
+	}
+	return &Manager{rdb: rdb, cooldown: cooldown}
 }
 
 // Add adds a proxy URL with a priority score (lower = higher priority).
@@ -108,7 +111,7 @@ func (m *Manager) GetTransport(ctx context.Context) (http.RoundTripper, string, 
 	for _, p := range proxies {
 		if !p.Healthy {
 			// Check if cooldown expired
-			if time.Since(p.LastChecked) < cooldownDuration {
+			if time.Since(p.LastChecked) < m.cooldown {
 				slog.DebugContext(ctx, "proxy in cooldown", "url", p.URL, "fail_count", p.FailCount)
 				continue
 			}

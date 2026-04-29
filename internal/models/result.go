@@ -13,6 +13,15 @@ type RelayResult struct {
 	ExecutedAt time.Time         `json:"executed_at"`
 }
 
+// ResultDeliveryStatus tracks sender-side durability for returning results.
+type ResultDeliveryStatus string
+
+const (
+	ResultPending ResultDeliveryStatus = "pending"
+	ResultLeased  ResultDeliveryStatus = "leased"
+	ResultAcked   ResultDeliveryStatus = "acked"
+)
+
 // ResultStatus tracks webhook delivery state.
 type ResultStatus string
 

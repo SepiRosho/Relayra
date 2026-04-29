@@ -30,13 +30,14 @@ func (r *Redis) StoreRequestMetadata(ctx context.Context, peerID string, req *mo
 
 	reqKey := keyRequestPrefix + req.ID
 	if err := r.Client.HSet(ctx, reqKey, map[string]interface{}{
-		"id":          req.ID,
-		"peer_id":     peerID,
-		"webhook_url": req.WebhookURL,
-		"status":      string(req.Status),
-		"created_at":  req.CreatedAt.Unix(),
-		"data":        string(data),
-		"async":       req.Async,
+		"id":                 req.ID,
+		"peer_id":            peerID,
+		"webhook_url":        req.WebhookURL,
+		"status":             string(req.Status),
+		"created_at":         req.CreatedAt.Unix(),
+		"data":               string(data),
+		"async":              req.Async,
+		requestLeaseUntilField: 0,
 	}).Err(); err != nil {
 		slog.ErrorContext(ctx, "failed to store request metadata", "error", err)
 		return fmt.Errorf("store request metadata: %w", err)
@@ -45,7 +46,7 @@ func (r *Redis) StoreRequestMetadata(ctx context.Context, peerID string, req *mo
 	return nil
 }
 
-// EnqueueRequest adds a relay request to the peer's queue.
+// EnqueueRequest adds a relay request to the peer's durable queue.
 func (r *Redis) EnqueueRequest(ctx context.Context, peerID string, req *models.RelayRequest) error {
 	ctx = logger.WithComponent(ctx, "store")
 	ctx = logger.WithRequestID(ctx, req.ID)
@@ -57,21 +58,19 @@ func (r *Redis) EnqueueRequest(ctx context.Context, peerID string, req *models.R
 	}
 
 	pipe := r.Client.Pipeline()
-
-	// Push to peer queue
 	queueKey := keyQueuePrefix + peerID
-	pipe.RPush(ctx, queueKey, data)
-
-	// Store request metadata
 	reqKey := keyRequestPrefix + req.ID
+
+	pipe.RPush(ctx, queueKey, req.ID)
 	pipe.HSet(ctx, reqKey, map[string]interface{}{
-		"id":          req.ID,
-		"peer_id":     peerID,
-		"webhook_url": req.WebhookURL,
-		"status":      string(models.StatusQueued),
-		"created_at":  req.CreatedAt.Unix(),
-		"data":        string(data),
-		"async":       req.Async,
+		"id":                 req.ID,
+		"peer_id":            peerID,
+		"webhook_url":        req.WebhookURL,
+		"status":             string(models.StatusQueued),
+		"created_at":         req.CreatedAt.Unix(),
+		"data":               string(data),
+		"async":              req.Async,
+		requestLeaseUntilField: 0,
 	})
 
 	if _, err := pipe.Exec(ctx); err != nil {
@@ -80,59 +79,12 @@ func (r *Redis) EnqueueRequest(ctx context.Context, peerID string, req *models.R
 	}
 
 	slog.InfoContext(ctx, "request enqueued", "queue_key", queueKey)
-	slog.DebugContext(ctx, "enqueued request data", "url", req.Request.URL, "method", req.Request.Method)
 	return nil
 }
 
-// DequeueRequests pulls up to batchSize requests from a peer's queue.
+// DequeueRequests is kept as a compatibility wrapper around LeaseRequests.
 func (r *Redis) DequeueRequests(ctx context.Context, peerID string, batchSize int) ([]models.RelayRequest, error) {
-	ctx = logger.WithComponent(ctx, "store")
-	ctx = logger.WithPeerID(ctx, peerID)
-
-	queueKey := keyQueuePrefix + peerID
-
-	// Check queue length first
-	length, err := r.Client.LLen(ctx, queueKey).Result()
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to check queue length", "error", err)
-		return nil, fmt.Errorf("queue length: %w", err)
-	}
-
-	if length == 0 {
-		slog.DebugContext(ctx, "queue empty", "queue_key", queueKey)
-		return nil, nil
-	}
-
-	// Pop up to batchSize items
-	count := int(length)
-	if count > batchSize {
-		count = batchSize
-	}
-
-	var requests []models.RelayRequest
-	for i := 0; i < count; i++ {
-		data, err := r.Client.LPop(ctx, queueKey).Result()
-		if err == redis.Nil {
-			break
-		}
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to pop from queue", "error", err, "index", i)
-			return requests, fmt.Errorf("dequeue at index %d: %w", i, err)
-		}
-
-		var req models.RelayRequest
-		if err := json.Unmarshal([]byte(data), &req); err != nil {
-			slog.ErrorContext(ctx, "failed to unmarshal queued request", "error", err, "raw_data_len", len(data))
-			continue // Skip malformed entries
-		}
-
-		// Update status to sent
-		r.Client.HSet(ctx, keyRequestPrefix+req.ID, "status", string(models.StatusSent))
-		requests = append(requests, req)
-	}
-
-	slog.InfoContext(ctx, "dequeued requests", "count", len(requests), "remaining", length-int64(len(requests)))
-	return requests, nil
+	return r.LeaseRequests(ctx, peerID, batchSize, 30*time.Second)
 }
 
 // QueueLength returns the number of pending requests for a peer.
@@ -171,26 +123,23 @@ func (r *Redis) UpdateRequestStatus(ctx context.Context, requestID string, statu
 		slog.ErrorContext(ctx, "failed to update request status", "status", status, "error", err)
 		return fmt.Errorf("update request status: %w", err)
 	}
-
-	slog.DebugContext(ctx, "request status updated", "status", status)
 	return nil
 }
 
-// AckRequests marks requests as received by the Sender.
+// AckRequests is kept as a compatibility wrapper.
 func (r *Redis) AckRequests(ctx context.Context, requestIDs []string) error {
-	ctx = logger.WithComponent(ctx, "store")
-
+	now := time.Now()
+	states := make([]models.RequestSyncState, 0, len(requestIDs))
 	for _, id := range requestIDs {
-		r.Client.HSet(ctx, keyRequestPrefix+id, "status", string(models.StatusExecuting))
+		states = append(states, models.RequestSyncState{
+			RequestID:  id,
+			Status:     models.StatusReceived,
+			LeaseUntil: now.Add(30 * time.Second),
+			UpdatedAt:  now,
+		})
 	}
-
-	slog.InfoContext(ctx, "acknowledged requests", "count", len(requestIDs))
-	return nil
+	return r.ApplyRequestStates(ctx, states)
 }
-
-// --- Sender-side: pending results queue ---
-
-const keyPendingResults = "relayra:pending_results"
 
 // PushResult stores a result locally on the Sender, waiting to be sent back.
 func (r *Redis) PushResult(ctx context.Context, result *models.RelayResult) error {
@@ -202,90 +151,38 @@ func (r *Redis) PushResult(ctx context.Context, result *models.RelayResult) erro
 		return fmt.Errorf("marshal result: %w", err)
 	}
 
-	if err := r.Client.RPush(ctx, keyPendingResults, data).Err(); err != nil {
+	pipe := r.Client.Pipeline()
+	pipe.ZAdd(ctx, keyPendingResultsSet, redis.Z{Score: float64(time.Now().UnixMilli()), Member: result.RequestID})
+	pipe.HSet(ctx, keyPendingResultPrefix+result.RequestID, map[string]interface{}{
+		"data":                  string(data),
+		resultStatusField:       string(models.ResultPending),
+		resultLeaseUntilField:   0,
+		senderStateUpdatedField: time.Now().Unix(),
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
 		slog.ErrorContext(ctx, "failed to push result", "error", err)
 		return fmt.Errorf("push result: %w", err)
 	}
 
-	slog.InfoContext(ctx, "result stored locally",
-		"status_code", result.StatusCode,
-		"duration_ms", result.Duration,
-	)
 	return nil
 }
 
-// PopResults retrieves and removes pending results from the Sender's local store.
+// PopResults is kept as a compatibility wrapper around LeaseResults.
 func (r *Redis) PopResults(ctx context.Context, maxCount int) ([]models.RelayResult, error) {
-	ctx = logger.WithComponent(ctx, "store")
-
-	length, err := r.Client.LLen(ctx, keyPendingResults).Result()
-	if err != nil {
-		return nil, fmt.Errorf("pending results length: %w", err)
-	}
-
-	if length == 0 {
-		return nil, nil
-	}
-
-	count := int(length)
-	if count > maxCount {
-		count = maxCount
-	}
-
-	var results []models.RelayResult
-	for i := 0; i < count; i++ {
-		data, err := r.Client.LPop(ctx, keyPendingResults).Result()
-		if err == redis.Nil {
-			break
-		}
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to pop result", "error", err, "index", i)
-			return results, fmt.Errorf("pop result at index %d: %w", i, err)
-		}
-
-		var result models.RelayResult
-		if err := json.Unmarshal([]byte(data), &result); err != nil {
-			slog.ErrorContext(ctx, "failed to unmarshal result", "error", err)
-			continue
-		}
-		results = append(results, result)
-	}
-
-	slog.InfoContext(ctx, "popped pending results", "count", len(results))
-	return results, nil
+	return r.LeaseResults(ctx, maxCount, 30*time.Second)
 }
 
 // PendingResultsCount returns the number of results waiting to be sent.
 func (r *Redis) PendingResultsCount(ctx context.Context) (int64, error) {
-	return r.Client.LLen(ctx, keyPendingResults).Result()
+	return r.Client.ZCard(ctx, keyPendingResultsSet).Result()
 }
 
-// RePushResults puts results back into the pending queue (e.g., if send failed).
+// RePushResults remains a no-op because leased results stay durable until acked.
 func (r *Redis) RePushResults(ctx context.Context, results []models.RelayResult) error {
-	ctx = logger.WithComponent(ctx, "store")
-
-	for _, result := range results {
-		data, err := json.Marshal(result)
-		if err != nil {
-			slog.ErrorContext(ctx, "failed to re-marshal result for re-push", "request_id", result.RequestID, "error", err)
-			continue
-		}
-		r.Client.LPush(ctx, keyPendingResults, data) // Push back to front
-	}
-
-	slog.WarnContext(ctx, "re-pushed results after failure", "count", len(results))
 	return nil
 }
 
 // DeleteAckedResults removes results that the Listener has acknowledged.
-// On Sender side, this clears results that we know were received.
 func (r *Redis) DeleteAckedResults(ctx context.Context, resultIDs []string) {
-	ctx = logger.WithComponent(ctx, "store")
-	slog.InfoContext(ctx, "acknowledged results deleted from local store", "count", len(resultIDs))
-	// Results are already removed from the list by PopResults.
-	// This is a no-op confirmation log. The two-phase ack ensures
-	// that if the Sender crashes after popping but before receiving ack,
-	// the results are lost — but the Listener hasn't acked them either,
-	// so the workflow is consistent.
-	_ = time.Now() // avoid unused import
+	_ = r.AckResults(ctx, resultIDs)
 }

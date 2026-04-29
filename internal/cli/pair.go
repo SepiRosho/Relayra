@@ -148,7 +148,7 @@ var pairConnectCmd = &cobra.Command{
 		fmt.Printf("Connecting to Listener '%s' at %s...\n", token.ListenerName, token.ListenerAddr)
 
 		// Get proxy transport
-		proxyMgr := proxy.NewManager(rdb)
+		proxyMgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
 		transport, proxyURL, err := proxyMgr.GetTransport(ctx)
 		if err != nil {
 			slog.WarnContext(ctx, "no proxy available, trying direct connection", "error", err)

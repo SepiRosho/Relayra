@@ -32,9 +32,18 @@ func (r *Redis) StoreResult(ctx context.Context, result *models.RelayResult, ttl
 	pipe := r.Client.Pipeline()
 	pipe.Set(ctx, resultKey, data, ttl)
 
-	// Also update request status to completed
+	// Also update request status to completed and remove it from the durable queue.
 	reqKey := keyRequestPrefix + result.RequestID
 	pipe.HSet(ctx, reqKey, "status", string(models.StatusCompleted))
+	peerID := ""
+	if values, err := r.Client.HMGet(ctx, reqKey, "peer_id").Result(); err == nil && len(values) == 1 && values[0] != nil {
+		if v, ok := values[0].(string); ok {
+			peerID = v
+		}
+	}
+	if peerID != "" {
+		pipe.LRem(ctx, keyQueuePrefix+peerID, 0, result.RequestID)
+	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		slog.ErrorContext(ctx, "failed to store result", "error", err)

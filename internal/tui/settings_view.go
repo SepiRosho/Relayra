@@ -39,8 +39,9 @@ var editableKeys = map[string]bool{
 	"poll_interval":            true,
 	"poll_batch_size":          true,
 	"request_timeout":          true,
-	"long_polling":             true,
+	"transport_mode":           true,
 	"long_poll_wait":           true,
+	"proxy_cooldown_seconds":   true,
 	"async_workers":            true,
 	"allow_listener_execution": true,
 	"result_ttl":               true,
@@ -74,8 +75,9 @@ func NewSettingsView(cfg *config.Config, rdb store.Backend) *SettingsView {
 		{"Poll Interval", fmt.Sprintf("%d", cfg.PollInterval), "poll_interval"},
 		{"Poll Batch Size", fmt.Sprintf("%d", cfg.PollBatchSize), "poll_batch_size"},
 		{"Request Timeout", fmt.Sprintf("%d", cfg.RequestTimeout), "request_timeout"},
-		{"Long Polling", fmt.Sprintf("%t", cfg.LongPolling), "long_polling"},
+		{"Transport Mode", cfg.NormalizedTransportMode(), "transport_mode"},
 		{"Long Poll Wait", fmt.Sprintf("%d", cfg.LongPollWait), "long_poll_wait"},
+		{"Proxy Cooldown Seconds", fmt.Sprintf("%d", cfg.ProxyCooldownSeconds), "proxy_cooldown_seconds"},
 		{"Async Workers", fmt.Sprintf("%d", cfg.AsyncWorkers), "async_workers"},
 		{"Allow Listener Execution", fmt.Sprintf("%t", cfg.AllowListenerExecution), "allow_listener_execution"},
 		{"Result TTL", fmt.Sprintf("%d", cfg.ResultTTL), "result_ttl"},
@@ -210,14 +212,22 @@ func (sv *SettingsView) applyEdit() tea.Cmd {
 				sv.cfg.RequestTimeout = v
 				sv.items[sv.cursor].Value = newVal
 			}
-		case "long_polling":
-			if v, ok := parseBool(newVal); ok {
-				sv.cfg.LongPolling = v
-				sv.items[sv.cursor].Value = fmt.Sprintf("%t", v)
+		case "transport_mode":
+			mode := strings.ToLower(newVal)
+			switch mode {
+			case config.TransportModeInterval, config.TransportModeLongPoll, config.TransportModeWebSocket:
+				sv.cfg.TransportMode = mode
+				sv.cfg.LongPolling = mode == config.TransportModeLongPoll
+				sv.items[sv.cursor].Value = mode
 			}
 		case "long_poll_wait":
 			if v, err := strconv.Atoi(newVal); err == nil && v >= 1 {
 				sv.cfg.LongPollWait = v
+				sv.items[sv.cursor].Value = newVal
+			}
+		case "proxy_cooldown_seconds":
+			if v, err := strconv.Atoi(newVal); err == nil && v >= 1 {
+				sv.cfg.ProxyCooldownSeconds = v
 				sv.items[sv.cursor].Value = newVal
 			}
 		case "async_workers":

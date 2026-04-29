@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/logger"
@@ -20,6 +21,7 @@ type dispatcher struct {
 	serialCh chan models.RelayRequest
 	wg       sync.WaitGroup
 	inFlight atomic.Int64
+	leaseTTL time.Duration
 }
 
 func newDispatcher(cfg *config.Config, rdb store.Backend) *dispatcher {
@@ -28,6 +30,7 @@ func newDispatcher(cfg *config.Config, rdb store.Backend) *dispatcher {
 		rdb:      rdb,
 		asyncSem: make(chan struct{}, cfg.AsyncWorkers),
 		serialCh: make(chan models.RelayRequest, cfg.PollBatchSize*2),
+		leaseTTL: senderRequestLeaseDuration(cfg),
 	}
 
 	d.wg.Add(1)
@@ -65,6 +68,16 @@ func (d *dispatcher) Dispatch(_ context.Context, req models.RelayRequest) {
 
 func (d *dispatcher) execute(ctx context.Context, req *models.RelayRequest) {
 	defer d.inFlight.Add(-1)
+	now := time.Now()
+
+	if err := d.rdb.StoreSenderRequestState(ctx, &models.RequestSyncState{
+		RequestID:  req.ID,
+		Status:     models.StatusExecuting,
+		LeaseUntil: now.Add(d.leaseTTL),
+		UpdatedAt:  now,
+	}); err != nil {
+		slog.ErrorContext(ctx, "failed to mark request executing", "error", err)
+	}
 
 	slog.InfoContext(ctx, "dispatching request for execution",
 		"url", req.Request.URL,
@@ -75,6 +88,17 @@ func (d *dispatcher) execute(ctx context.Context, req *models.RelayRequest) {
 	result := relayexec.ExecuteRequest(ctx, req, d.cfg.RequestTimeout)
 	if err := d.rdb.PushResult(ctx, result); err != nil {
 		slog.ErrorContext(ctx, "failed to store result locally", "error", err)
+		return
+	}
+
+	doneAt := time.Now()
+	if err := d.rdb.StoreSenderRequestState(ctx, &models.RequestSyncState{
+		RequestID:  req.ID,
+		Status:     models.StatusCompleted,
+		LeaseUntil: doneAt.Add(d.leaseTTL),
+		UpdatedAt:  doneAt,
+	}); err != nil {
+		slog.ErrorContext(ctx, "failed to mark request completed", "error", err)
 	}
 }
 

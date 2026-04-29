@@ -23,6 +23,8 @@ const (
 	StepRedisAddr
 	StepRedisPort
 	StepRedisPassword
+	StepTransportMode
+	StepProxyCooldown
 	StepLogLevel
 	StepAllowListenerExecution
 	StepConfirm
@@ -36,6 +38,7 @@ type SetupWizard struct {
 	textInput        textinput.Model
 	roleIdx          int
 	storageIdx       int
+	transportIdx     int
 	logIdx           int
 	allowListenerIdx int
 	err              error
@@ -61,6 +64,7 @@ func NewSetupWizard() *SetupWizard {
 		cfg:              cfg,
 		textInput:        ti,
 		storageIdx:       0,
+		transportIdx:     1,
 		allowListenerIdx: 1,
 		machineID:        machineID,
 	}
@@ -90,6 +94,9 @@ func (w *SetupWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if w.step == StepLogLevel && w.logIdx > 0 {
 				w.logIdx--
 			}
+			if w.step == StepTransportMode && w.transportIdx > 0 {
+				w.transportIdx--
+			}
 			if w.step == StepAllowListenerExecution && w.allowListenerIdx > 0 {
 				w.allowListenerIdx--
 			}
@@ -104,6 +111,9 @@ func (w *SetupWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if w.step == StepLogLevel && w.logIdx < 3 {
 				w.logIdx++
+			}
+			if w.step == StepTransportMode && w.transportIdx < 2 {
+				w.transportIdx++
 			}
 			if w.step == StepAllowListenerExecution && w.allowListenerIdx < 1 {
 				w.allowListenerIdx++
@@ -124,7 +134,7 @@ func (w *SetupWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (w *SetupWizard) isTextStep() bool {
 	switch w.step {
-	case StepListenAddr, StepListenPort, StepPublicAddr, StepInstanceName, StepSQLitePath, StepRedisAddr, StepRedisPort, StepRedisPassword:
+	case StepListenAddr, StepListenPort, StepPublicAddr, StepInstanceName, StepSQLitePath, StepRedisAddr, StepRedisPort, StepRedisPassword, StepProxyCooldown:
 		return true
 	}
 	return false
@@ -217,7 +227,11 @@ func (w *SetupWizard) advance() (tea.Model, tea.Cmd) {
 		}
 		w.cfg.SQLitePath = v
 		w.err = nil
-		w.step = StepLogLevel
+		if w.cfg.Role == config.RoleSender {
+			w.step = StepTransportMode
+		} else {
+			w.step = StepLogLevel
+		}
 
 	case StepRedisAddr:
 		v := strings.TrimSpace(w.textInput.Value())
@@ -244,6 +258,33 @@ func (w *SetupWizard) advance() (tea.Model, tea.Cmd) {
 	case StepRedisPassword:
 		w.cfg.RedisPassword = w.textInput.Value()
 		w.textInput.EchoMode = textinput.EchoNormal
+		if w.cfg.Role == config.RoleSender {
+			w.step = StepTransportMode
+		} else {
+			w.step = StepLogLevel
+		}
+
+	case StepTransportMode:
+		modes := []string{config.TransportModeInterval, config.TransportModeLongPoll, config.TransportModeWebSocket}
+		w.cfg.TransportMode = modes[w.transportIdx]
+		w.cfg.LongPolling = w.cfg.TransportMode == config.TransportModeLongPoll
+		w.step = StepProxyCooldown
+		w.textInput.SetValue(fmt.Sprintf("%d", w.cfg.ProxyCooldownSeconds))
+		w.textInput.Placeholder = "e.g., 300"
+
+	case StepProxyCooldown:
+		v := strings.TrimSpace(w.textInput.Value())
+		if v == "" {
+			v = fmt.Sprintf("%d", w.cfg.ProxyCooldownSeconds)
+		}
+		var seconds int
+		fmt.Sscanf(v, "%d", &seconds)
+		if seconds < 1 {
+			w.err = fmt.Errorf("proxy cooldown must be at least 1 second")
+			return w, nil
+		}
+		w.cfg.ProxyCooldownSeconds = seconds
+		w.err = nil
 		w.step = StepLogLevel
 
 	case StepLogLevel:
@@ -379,6 +420,36 @@ func (w *SetupWizard) View() string {
 		b.WriteString("\n\n  ")
 		b.WriteString(w.textInput.View())
 
+	case StepTransportMode:
+		b.WriteString(subtitleStyle.Render("  Sender transport mode:"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  Choose how this Sender keeps its control channel open"))
+		b.WriteString("\n\n")
+		modes := []string{"interval", "long-poll", "websocket"}
+		descs := []string{
+			"Periodic polling on a fixed interval",
+			"HTTP long-polling with hold-open requests",
+			"Persistent WebSocket with automatic long-poll fallback",
+		}
+		for i, mode := range modes {
+			cursor := "  "
+			style := normalStyle
+			if i == w.transportIdx {
+				cursor = "â–¸ "
+				style = selectedStyle
+			}
+			b.WriteString(style.Render(fmt.Sprintf("%s%-12s", cursor, mode)))
+			b.WriteString(dimStyle.Render(" " + descs[i]))
+			b.WriteString("\n")
+		}
+
+	case StepProxyCooldown:
+		b.WriteString(subtitleStyle.Render("  Proxy cooldown (seconds):"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  How long a proxy should stay out of rotation after 3 failures"))
+		b.WriteString("\n\n  ")
+		b.WriteString(w.textInput.View())
+
 	case StepLogLevel:
 		b.WriteString(subtitleStyle.Render("  Log level:"))
 		b.WriteString("\n\n")
@@ -438,6 +509,10 @@ func (w *SetupWizard) View() string {
 			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("SQLite:"), valueStyle.Render(w.cfg.SQLitePath)))
 		} else {
 			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Redis:"), valueStyle.Render(w.cfg.RedisURL())))
+		}
+		if w.cfg.Role == config.RoleSender {
+			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Transport:"), valueStyle.Render(w.cfg.NormalizedTransportMode())))
+			b.WriteString(fmt.Sprintf("  %s %d\n", labelStyle.Render("Proxy Cooldown:"), w.cfg.ProxyCooldownSeconds))
 		}
 		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Log Level:"), valueStyle.Render(w.cfg.LogLevel)))
 		if w.cfg.Role == config.RoleListener {

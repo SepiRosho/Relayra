@@ -23,18 +23,18 @@ import (
 
 const activeWorkPollInterval = 250 * time.Millisecond
 
-// Run starts the Sender polling loop.
+// Run starts the Sender runtime.
 func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 	ctx = logger.WithComponent(ctx, "poller")
 
-	// Get Listener info
 	listenerInfo, err := rdb.GetListenerInfo(ctx)
 	if err != nil || listenerInfo == nil {
 		return fmt.Errorf("no Listener paired — run 'relayra pair connect <token>' first")
 	}
 
-	proxyMgr := proxy.NewManager(rdb)
+	proxyMgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
 	proxyCount, _ := proxyMgr.Count(ctx)
+	mode := cfg.NormalizedTransportMode()
 
 	slog.InfoContext(ctx, "Sender starting",
 		"listener_name", listenerInfo.Name,
@@ -42,24 +42,32 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 		"proxy_count", proxyCount,
 		"poll_interval", cfg.PollInterval,
 		"batch_size", cfg.PollBatchSize,
-		"long_polling", cfg.LongPolling,
+		"transport_mode", mode,
 		"long_poll_wait", cfg.LongPollWait,
 		"async_workers", cfg.AsyncWorkers,
+		"proxy_cooldown_seconds", cfg.ProxyCooldownSeconds,
 	)
 	dispatcher := newDispatcher(cfg, rdb)
 	defer dispatcher.Close()
 
-	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	// Track which request IDs we need to ack
-	var pendingAcks []string
-	var cycle int64
-	var failureBackoff time.Duration = time.Second
+	if mode == config.TransportModeWebSocket {
+		return runWebSocketMode(ctx, cfg, rdb, listenerInfo, proxyMgr, dispatcher, sigCh)
+	}
+	return runHTTPMode(ctx, cfg, rdb, listenerInfo, proxyMgr, dispatcher, sigCh, mode == config.TransportModeLongPoll)
+}
 
-	if cfg.LongPolling {
+func runHTTPMode(ctx context.Context, cfg *config.Config, rdb store.Backend,
+	listenerInfo *models.Peer, proxyMgr *proxy.Manager, dispatcher *dispatcher,
+	sigCh <-chan os.Signal, longPoll bool) error {
+
+	var cycle int64
+	failureBackoff := time.Second
+
+	if longPoll {
 		for {
 			select {
 			case sig := <-sigCh:
@@ -73,9 +81,7 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 
 			cycle++
 			pollCtx := logger.WithPollCycle(ctx, cycle)
-			newAcks, success := doPollCycle(pollCtx, cfg, rdb, listenerInfo, proxyMgr, dispatcher, pendingAcks)
-			pendingAcks = newAcks
-
+			success := doPollCycleHTTP(pollCtx, cfg, rdb, listenerInfo, proxyMgr, dispatcher, true)
 			if success {
 				failureBackoff = time.Second
 				if dispatcher.InFlight() > 0 {
@@ -111,86 +117,58 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 
 		cycle++
 		pollCtx := logger.WithPollCycle(ctx, cycle)
-		newAcks, _ := doPollCycle(pollCtx, cfg, rdb, listenerInfo, proxyMgr, dispatcher, pendingAcks)
-		pendingAcks = newAcks
+		_ = doPollCycleHTTP(pollCtx, cfg, rdb, listenerInfo, proxyMgr, dispatcher, false)
 	}
 }
 
-func doPollCycle(ctx context.Context, cfg *config.Config, rdb store.Backend,
-	listenerInfo *models.Peer, proxyMgr *proxy.Manager, dispatcher *dispatcher, ackRequestIDs []string) ([]string, bool) {
+func doPollCycleHTTP(ctx context.Context, cfg *config.Config, rdb store.Backend,
+	listenerInfo *models.Peer, proxyMgr *proxy.Manager, dispatcher *dispatcher, longPoll bool) bool {
 
 	start := time.Now()
-	waitSeconds := requestedPollWait(cfg, dispatcher)
+	waitSeconds := requestedPollWait(cfg, dispatcher, longPoll)
 	slog.InfoContext(ctx, "poll cycle starting",
-		"pending_acks", len(ackRequestIDs),
 		"wait_seconds", waitSeconds,
 		"in_flight", dispatcher.InFlight(),
 	)
 
-	// Get pending results to send back
-	results, err := rdb.PopResults(ctx, cfg.PollBatchSize)
+	payloadUp, leasedResults, err := buildPayloadUp(ctx, cfg, rdb)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to pop pending results", "error", err)
-		results = nil
+		slog.ErrorContext(ctx, "failed to build outbound sync payload", "error", err)
+		_ = leasedResults
+		return false
 	}
 
-	// Build poll payload
-	payloadUp := models.PollPayloadUp{
-		Results:       results,
-		AckRequestIDs: ackRequestIDs,
-	}
-
-	// Encrypt
-	ciphertext, nonce, timestamp, err := crypto.EncryptJSON(listenerInfo.EncryptionKey, &payloadUp)
+	ciphertext, nonce, timestamp, err := crypto.EncryptJSON(listenerInfo.EncryptionKey, payloadUp)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to encrypt poll payload", "error", err)
-		// Re-push results so they're not lost
-		if len(results) > 0 {
-			rdb.RePushResults(ctx, results)
-		}
-		return ackRequestIDs, false // Keep pending acks for next cycle
+		return false
 	}
 
-	// Use the peer ID assigned to us during pairing (stored in listener info)
-	peerID := listenerInfo.ID
-
 	pollReq := models.PollRequest{
-		PeerID:      peerID,
+		PeerID:      listenerInfo.ID,
 		Nonce:       nonce,
 		Timestamp:   timestamp,
 		Payload:     ciphertext,
 		WaitSeconds: waitSeconds,
 	}
-
 	reqBody, _ := json.Marshal(pollReq)
 
-	// Get proxy transport
 	transport, proxyURL, err := proxyMgr.GetTransport(ctx)
 	if err != nil {
 		slog.ErrorContext(ctx, "no proxy available", "error", err)
-		// Re-push results
-		if len(results) > 0 {
-			rdb.RePushResults(ctx, results)
-		}
-		return ackRequestIDs, false
+		return false
 	}
 
-	slog.DebugContext(ctx, "using proxy", "proxy_url", proxyURL)
-
-	// Send poll request
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   pollRequestTimeout(cfg),
+		Timeout:   pollRequestTimeout(cfg, longPoll),
 	}
 
 	pollURL := fmt.Sprintf("http://%s/api/v1/poll", listenerInfo.Address)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, pollURL, bytes.NewReader(reqBody))
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to create poll request", "error", err)
-		if len(results) > 0 {
-			rdb.RePushResults(ctx, results)
-		}
-		return ackRequestIDs, false
+		return false
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -198,10 +176,7 @@ func doPollCycle(ctx context.Context, cfg *config.Config, rdb store.Backend,
 	if err != nil {
 		if ctx.Err() != nil {
 			slog.InfoContext(ctx, "poll request cancelled during shutdown", "error", err)
-			if len(results) > 0 {
-				rdb.RePushResults(ctx, results)
-			}
-			return ackRequestIDs, false
+			return false
 		}
 		slog.ErrorContext(ctx, "poll request failed",
 			"error", err,
@@ -209,68 +184,129 @@ func doPollCycle(ctx context.Context, cfg *config.Config, rdb store.Backend,
 			"listener", listenerInfo.Address,
 		)
 		proxyMgr.MarkFailed(ctx, proxyURL)
-		// Re-push results
-		if len(results) > 0 {
-			rdb.RePushResults(ctx, results)
-		}
-		return ackRequestIDs, false
+		return false
 	}
 	defer resp.Body.Close()
 
-	// Mark proxy as successful
 	proxyMgr.MarkSuccess(ctx, proxyURL)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to read poll response", "error", err)
-		return ackRequestIDs, false
+		return false
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		slog.ErrorContext(ctx, "poll response error",
 			"status", resp.StatusCode,
 			"body", truncateStr(string(respBody), 4096),
 		)
-		return ackRequestIDs, false
+		return false
 	}
 
-	// Parse response
 	var pollResp models.PollResponse
 	if err := json.Unmarshal(respBody, &pollResp); err != nil {
 		slog.ErrorContext(ctx, "failed to parse poll response", "error", err)
-		return ackRequestIDs, false
+		return false
 	}
 
-	// Decrypt response
 	var payloadDown models.PollPayloadDown
 	if err := crypto.DecryptJSON(listenerInfo.EncryptionKey, pollResp.Payload, pollResp.Nonce, pollResp.Timestamp, &payloadDown); err != nil {
 		slog.ErrorContext(ctx, "failed to decrypt poll response", "error", err)
-		return ackRequestIDs, false
+		return false
+	}
+
+	if err := processPollResponse(ctx, cfg, rdb, dispatcher, &payloadDown); err != nil {
+		slog.ErrorContext(ctx, "failed to process poll response", "error", err)
+		return false
 	}
 
 	duration := time.Since(start)
 	slog.InfoContext(ctx, "poll cycle completed",
 		"new_requests", len(payloadDown.Requests),
 		"acked_results", len(payloadDown.AckResultIDs),
-		"results_sent", len(results),
+		"results_sent", len(leasedResults),
+		"known_request_states", len(payloadUp.RequestStates),
 		"duration_ms", duration.Milliseconds(),
 	)
+	return true
+}
 
-	// Process acked results (Listener confirmed receipt)
+func buildPayloadUp(ctx context.Context, cfg *config.Config, rdb store.Backend) (*models.PollPayloadUp, []models.RelayResult, error) {
+	results, err := rdb.LeaseResults(ctx, cfg.PollBatchSize, senderResultLeaseDuration(cfg))
+	if err != nil {
+		return nil, nil, err
+	}
+	requestStates, err := rdb.ListSenderRequestStates(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &models.PollPayloadUp{
+		Results:       results,
+		RequestStates: requestStates,
+	}, results, nil
+}
+
+func processPollResponse(ctx context.Context, cfg *config.Config, rdb store.Backend, dispatcher *dispatcher, payloadDown *models.PollPayloadDown) error {
 	if len(payloadDown.AckResultIDs) > 0 {
-		rdb.DeleteAckedResults(ctx, payloadDown.AckResultIDs)
+		if err := rdb.AckResults(ctx, payloadDown.AckResultIDs); err != nil {
+			return err
+		}
 	}
 
-	// Dispatch new requests. Synchronous requests keep FIFO order through a
-	// single worker; async requests run concurrently and can complete independently.
-	var newAcks []string
 	for _, req := range payloadDown.Requests {
-		reqCtx := logger.WithRequestID(ctx, req.ID)
-		dispatcher.Dispatch(reqCtx, req)
-		newAcks = append(newAcks, req.ID)
+		if err := handleIncomingRequest(ctx, cfg, rdb, dispatcher, req); err != nil {
+			slog.ErrorContext(logger.WithRequestID(ctx, req.ID), "failed to handle incoming request", "error", err)
+		}
+	}
+	return nil
+}
+
+func handleIncomingRequest(ctx context.Context, cfg *config.Config, rdb store.Backend, dispatcher *dispatcher, req models.RelayRequest) error {
+	reqCtx := logger.WithRequestID(ctx, req.ID)
+	now := time.Now()
+	leaseUntil := now.Add(senderRequestLeaseDuration(cfg))
+
+	state, err := rdb.GetSenderRequestState(reqCtx, req.ID)
+	if err != nil {
+		return err
+	}
+	pendingResult, err := rdb.ResultPending(reqCtx, req.ID)
+	if err != nil {
+		return err
 	}
 
-	return newAcks, true
+	shouldDispatch := false
+	switch {
+	case state == nil:
+		shouldDispatch = true
+	case state.Status == models.StatusCompleted:
+		shouldDispatch = false
+	case pendingResult:
+		shouldDispatch = false
+	case state.LeaseUntil.IsZero() || !state.LeaseUntil.After(now):
+		shouldDispatch = true
+	}
+
+	receivedState := &models.RequestSyncState{
+		RequestID:  req.ID,
+		Status:     models.StatusReceived,
+		LeaseUntil: leaseUntil,
+		UpdatedAt:  now,
+	}
+	if err := rdb.StoreSenderRequestState(reqCtx, receivedState); err != nil {
+		return err
+	}
+
+	if !shouldDispatch {
+		slog.InfoContext(reqCtx, "duplicate request received; keeping durable state without redispatch",
+			"status", receivedState.Status,
+			"pending_result", pendingResult,
+		)
+		return nil
+	}
+
+	dispatcher.Dispatch(reqCtx, req)
+	return nil
 }
 
 func truncateStr(s string, maxLen int) string {
@@ -280,8 +316,8 @@ func truncateStr(s string, maxLen int) string {
 	return s
 }
 
-func requestedPollWait(cfg *config.Config, dispatcher *dispatcher) int {
-	if !cfg.LongPolling {
+func requestedPollWait(cfg *config.Config, dispatcher *dispatcher, longPoll bool) int {
+	if !longPoll {
 		return 0
 	}
 	if dispatcher.InFlight() > 0 {
@@ -290,8 +326,8 @@ func requestedPollWait(cfg *config.Config, dispatcher *dispatcher) int {
 	return cfg.LongPollWait
 }
 
-func pollRequestTimeout(cfg *config.Config) time.Duration {
-	if !cfg.LongPolling {
+func pollRequestTimeout(cfg *config.Config, longPoll bool) time.Duration {
+	if !longPoll {
 		return time.Duration(cfg.RequestTimeout) * time.Second
 	}
 
@@ -300,6 +336,22 @@ func pollRequestTimeout(cfg *config.Config) time.Duration {
 		timeoutSeconds = cfg.RequestTimeout
 	}
 	return time.Duration(timeoutSeconds) * time.Second
+}
+
+func senderRequestLeaseDuration(cfg *config.Config) time.Duration {
+	seconds := cfg.RequestTimeout + cfg.LongPollWait + cfg.PollInterval + 30
+	if seconds < cfg.RequestTimeout+30 {
+		seconds = cfg.RequestTimeout + 30
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func senderResultLeaseDuration(cfg *config.Config) time.Duration {
+	seconds := cfg.RequestTimeout + cfg.LongPollWait + cfg.PollInterval + 30
+	if seconds < cfg.RequestTimeout+30 {
+		seconds = cfg.RequestTimeout + 30
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func sleepWithCancel(ctx context.Context, sigCh <-chan os.Signal, d time.Duration) bool {

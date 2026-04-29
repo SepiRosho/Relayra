@@ -34,6 +34,7 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 	mux.HandleFunc("POST /api/v1/relay", h.Relay)
 	mux.HandleFunc("GET /api/v1/result/{requestID}", h.GetResult)
 	mux.HandleFunc("POST /api/v1/poll", h.Poll)
+	mux.HandleFunc("GET /api/v1/ws", h.WebSocket)
 	mux.HandleFunc("POST /api/v1/pair", h.Pair)
 	mux.HandleFunc("GET /api/v1/peers", h.ListPeers)
 

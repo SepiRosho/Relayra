@@ -7,7 +7,7 @@ Relayra is a Go CLI/TUI application for relaying HTTP requests between:
 - `listener`: internet-reachable node exposing the public API
 - `sender`: restricted node that polls the listener through configured proxies
 
-The sender pulls queued requests, executes them locally, and sends results back. Poll traffic is encrypted with AES-256-GCM using a key derived during pairing. Redis is the system of record for queues, peers, results, tokens, and proxy state.
+The sender pulls queued requests, executes them locally, and sends results back. Sync traffic is encrypted with AES-256-GCM using a key derived during pairing. Relayra supports Redis or SQLite for queues, peers, results, tokens, proxy state, leases, and sender request journals.
 
 ## Entry Points
 
@@ -26,17 +26,17 @@ The sender pulls queued requests, executes them locally, and sends results back.
 1. HTTP request arrives at `/api/v1/relay`.
 2. Listener validates API token if token auth is enabled.
 3. Request is stored in Redis and appended to the destination peer queue.
-4. Sender polls `/api/v1/poll`.
-5. Listener decrypts poll payload, stores returned results, optionally starts webhook delivery, acks previously received requests, and dequeues the next batch.
+4. Sender syncs over `/api/v1/poll` or `/api/v1/ws`.
+5. Listener decrypts the payload, reconciles sender request states, stores returned results, optionally starts webhook delivery, and leases the next batch.
 6. Client fetches results through `/api/v1/result/{id}` or receives them by webhook.
 
 ### Sender path
 
 1. Sender loads paired listener info from Redis.
 2. Sender chooses a proxy transport from the proxy manager.
-3. Sender polls listener on a fixed interval.
-4. Sender decrypts incoming batch, executes HTTP requests sequentially against local targets, stores results in a local pending-results queue, and includes request acknowledgements in the next poll.
-5. Listener acknowledges result receipt in later poll responses.
+3. Sender syncs with the listener using interval polling, long polling, or WebSocket with long-poll fallback.
+4. Sender decrypts incoming batches, dedupes by request ID, executes local HTTP requests, stores results durably, and reports local request states on each sync.
+5. Listener acknowledges stored result receipt in later sync responses.
 
 ## Main Packages
 
@@ -51,14 +51,15 @@ The sender pulls queued requests, executes them locally, and sends results back.
   - Auth middleware in [`middleware.go`](/E:/Go/Relayra/internal/server/middleware.go:1).
 
 - [`internal/poller`](/E:/Go/Relayra/internal/poller/poller.go:1)
-  - Sender polling loop.
+  - Sender sync loop and transport selection.
   - Uses proxy manager to reach listener.
   - Executes requests via [`executor.go`](/E:/Go/Relayra/internal/poller/executor.go:1).
+  - WebSocket transport in [`websocket.go`](/E:/Go/Relayra/internal/poller/websocket.go:1).
 
 - [`internal/proxy`](/E:/Go/Relayra/internal/proxy/manager.go:1)
   - Stores proxies in Redis sorted set.
   - Chooses proxies by priority.
-  - Tracks failure count and cooldown.
+  - Tracks failure count and config-driven cooldown.
   - Supports `http`, `https`, `socks5`, `socks5h`.
 
 - [`internal/store`](/E:/Go/Relayra/internal/store/redis.go:1)
@@ -112,12 +113,13 @@ The sender pulls queued requests, executes them locally, and sends results back.
 - `POST /api/v1/relay`
 - `GET /api/v1/result/{requestID}`
 - `POST /api/v1/poll`
+- `GET /api/v1/ws`
 - `POST /api/v1/pair`
 - `GET /api/v1/peers`
 
 Auth behavior:
 
-- `/health`, `/api/v1/poll`, and `/api/v1/pair` are exempt.
+- `/health`, `/api/v1/poll`, `/api/v1/ws`, and `/api/v1/pair` are exempt.
 - If zero API tokens exist, protected endpoints are open.
 - Once at least one token exists, Bearer auth is enforced for relay/result/peers.
 
@@ -126,7 +128,10 @@ Auth behavior:
 - `relayra:queue:<peerID>`: queued outbound requests for a sender
 - `relayra:request:<requestID>`: request metadata and status
 - `relayra:result:<requestID>`: completed result with TTL
-- `relayra:pending_results`: sender-side results waiting to be returned
+- `relayra:pending_results`: sender-side durable result index
+- `relayra:pending_result:<requestID>`: sender-side result payload + lease state
+- `relayra:sender_requests`: sender-side active request ID set
+- `relayra:sender_request:<requestID>`: sender-side request journal state
 - `relayra:peer:<peerID>`: peer record
 - `relayra:peers`: peer ID set
 - `relayra:pairing:<secretHash>`: one-time pairing token
@@ -146,7 +151,7 @@ Notable fields:
 - identity: machine ID, instance name, role
 - network: listen addr/port, public addr
 - Redis: addr/port/password/db
-- sender behavior: poll interval, batch size, request timeout
+- sender behavior: transport mode, poll interval, batch size, request timeout, proxy cooldown
 - ops: log level, log directory, retention
 - retention/retries: result TTL, webhook max retries
 
@@ -186,7 +191,7 @@ Current repo note:
 ## Risks / Things To Remember
 
 - Sender executes relayed requests sequentially; throughput work will likely start in `poller`.
-- The sender pops pending results before listener acknowledgement; the code comments note crash-loss risk in this area.
+- Delivery now uses durable leases plus resend/reconcile semantics, so behavior is intentionally at-least-once rather than exactly-once.
 - Pairing is one-time-token based and consumes the token on first successful retrieval.
 - Listener auth is intentionally disabled until the first API token exists.
 - Config path behavior changes between installed Linux layout and local dev layout.

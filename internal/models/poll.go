@@ -19,12 +19,12 @@ type PollResponse struct {
 
 // PollPayloadUp is the decrypted payload sent by the Sender.
 type PollPayloadUp struct {
-	Results       []RelayResult `json:"results,omitempty"`
-	AckRequestIDs []string      `json:"ack_request_ids,omitempty"` // Sender confirms it received these requests
+	Results       []RelayResult      `json:"results,omitempty"`
+	RequestStates []RequestSyncState `json:"request_states,omitempty"`
 }
 
 // PollPayloadDown is the decrypted payload sent by the Listener.
 type PollPayloadDown struct {
 	Requests     []RelayRequest `json:"requests,omitempty"`
-	AckResultIDs []string       `json:"ack_result_ids,omitempty"` // Listener confirms it received these results
+	AckResultIDs []string       `json:"ack_result_ids,omitempty"`
 }

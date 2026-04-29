@@ -113,8 +113,17 @@ func (s *SQLite) initSchema(ctx context.Context) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS pending_results (
 			seq INTEGER PRIMARY KEY,
-			request_id TEXT NOT NULL,
-			data TEXT NOT NULL
+			request_id TEXT NOT NULL UNIQUE,
+			data TEXT NOT NULL,
+			delivery_status TEXT NOT NULL DEFAULT 'pending',
+			lease_until INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE TABLE IF NOT EXISTS sender_request_states (
+			request_id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			lease_until INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
 		);`,
 		`CREATE TABLE IF NOT EXISTS api_tokens (
 			id TEXT PRIMARY KEY,
@@ -141,9 +150,16 @@ func (s *SQLite) initSchema(ctx context.Context) error {
 	migrations := []string{
 		`ALTER TABLE peers ADD COLUMN capabilities TEXT`,
 		`ALTER TABLE listener_info ADD COLUMN capabilities TEXT`,
+		`ALTER TABLE requests ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE pending_results ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE pending_results ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE pending_results ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_results_request_id ON pending_results(request_id)`,
 	}
 	for _, migration := range migrations {
-		if _, err := s.db.ExecContext(ctx, migration); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		if _, err := s.db.ExecContext(ctx, migration); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column name") &&
+			!strings.Contains(strings.ToLower(err.Error()), "already exists") {
 			return fmt.Errorf("run sqlite migration %q: %w", migration, err)
 		}
 	}
@@ -171,7 +187,7 @@ func (s *SQLite) FlushAll(ctx context.Context) (int64, error) {
 
 	tables := []string{
 		"peers", "pairing_tokens", "listener_info", "requests", "request_queue",
-		"results", "pending_results", "api_tokens", "proxies",
+		"results", "pending_results", "sender_request_states", "api_tokens", "proxies",
 	}
 	var total int64
 	for _, table := range tables {
@@ -399,15 +415,16 @@ func (s *SQLite) StoreRequestMetadata(ctx context.Context, peerID string, req *m
 		return fmt.Errorf("marshal request: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO requests (id, peer_id, webhook_url, status, created_at, data, async)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO requests (id, peer_id, webhook_url, status, created_at, data, async, lease_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0)
 		ON CONFLICT(id) DO UPDATE SET
 			peer_id=excluded.peer_id,
 			webhook_url=excluded.webhook_url,
 			status=excluded.status,
 			created_at=excluded.created_at,
 			data=excluded.data,
-			async=excluded.async
+			async=excluded.async,
+			lease_until=excluded.lease_until
 	`, req.ID, peerID, req.WebhookURL, string(req.Status), req.CreatedAt.Unix(), string(data), boolToInt(req.Async))
 	return err
 }
@@ -425,15 +442,16 @@ func (s *SQLite) EnqueueRequest(ctx context.Context, peerID string, req *models.
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO requests (id, peer_id, webhook_url, status, created_at, data, async)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO requests (id, peer_id, webhook_url, status, created_at, data, async, lease_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0)
 		ON CONFLICT(id) DO UPDATE SET
 			peer_id=excluded.peer_id,
 			webhook_url=excluded.webhook_url,
 			status=excluded.status,
 			created_at=excluded.created_at,
 			data=excluded.data,
-			async=excluded.async
+			async=excluded.async,
+			lease_until=excluded.lease_until
 	`, req.ID, peerID, req.WebhookURL, string(models.StatusQueued), req.CreatedAt.Unix(), string(data), boolToInt(req.Async)); err != nil {
 		return fmt.Errorf("store request metadata: %w", err)
 	}
@@ -448,62 +466,111 @@ func (s *SQLite) EnqueueRequest(ctx context.Context, peerID string, req *models.
 	return tx.Commit()
 }
 
-func (s *SQLite) DequeueRequests(ctx context.Context, peerID string, batchSize int) ([]models.RelayRequest, error) {
+func (s *SQLite) LeaseRequests(ctx context.Context, peerID string, batchSize int, leaseTTL time.Duration) ([]models.RelayRequest, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin dequeue tx: %w", err)
+		return nil, fmt.Errorf("begin lease requests tx: %w", err)
 	}
 	defer tx.Rollback()
 
+	now := time.Now().Unix()
+	leaseUntil := time.Now().Add(leaseTTL).Unix()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT seq, data FROM request_queue
-		WHERE peer_id = ?
-		ORDER BY seq ASC
+		SELECT q.request_id, q.data
+		FROM request_queue q
+		JOIN requests r ON r.id = q.request_id
+		WHERE q.peer_id = ?
+			AND r.status != ?
+			AND COALESCE(r.lease_until, 0) <= ?
+		ORDER BY q.seq ASC
 		LIMIT ?
-	`, peerID, batchSize)
+	`, peerID, string(models.StatusCompleted), now, batchSize)
 	if err != nil {
-		return nil, fmt.Errorf("query request queue: %w", err)
+		return nil, fmt.Errorf("query lease requests: %w", err)
 	}
 	defer rows.Close()
 
-	var (
-		seqs     []int64
-		requests []models.RelayRequest
-	)
+	var requests []models.RelayRequest
 	for rows.Next() {
-		var seq int64
+		var requestID string
 		var data string
-		if err := rows.Scan(&seq, &data); err != nil {
-			return nil, fmt.Errorf("scan queued request: %w", err)
+		if err := rows.Scan(&requestID, &data); err != nil {
+			return nil, fmt.Errorf("scan lease request: %w", err)
 		}
+
 		var req models.RelayRequest
 		if err := json.Unmarshal([]byte(data), &req); err != nil {
 			continue
 		}
-		seqs = append(seqs, seq)
+		req.Status = models.StatusLeased
 		requests = append(requests, req)
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE requests
+			SET status = ?, lease_until = ?, data = ?
+			WHERE id = ?
+		`, string(models.StatusLeased), leaseUntil, mustJSON(req), requestID); err != nil {
+			return nil, fmt.Errorf("update leased request: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	for i, req := range requests {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM request_queue WHERE seq = ?`, seqs[i]); err != nil {
-			return nil, fmt.Errorf("delete dequeued request: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = ? WHERE id = ?`, string(models.StatusSent), req.ID); err != nil {
-			return nil, fmt.Errorf("update request status sent: %w", err)
-		}
-	}
-
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit dequeue tx: %w", err)
+		return nil, fmt.Errorf("commit lease requests tx: %w", err)
 	}
 	return requests, nil
 }
 
+func (s *SQLite) ApplyRequestStates(ctx context.Context, requestStates []models.RequestSyncState) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin apply request states tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().Unix()
+	for _, state := range requestStates {
+		status := state.Status
+		if status == models.StatusCompleted {
+			exists, err := s.ResultExists(ctx, state.RequestID)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				status = models.StatusExecuting
+			}
+		}
+
+		leaseUntil := now
+		if !state.LeaseUntil.IsZero() {
+			leaseUntil = state.LeaseUntil.Unix()
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE requests
+			SET status = ?, lease_until = ?
+			WHERE id = ?
+		`, string(status), leaseUntil, state.RequestID); err != nil {
+			return fmt.Errorf("apply request state %s: %w", state.RequestID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLite) DequeueRequests(ctx context.Context, peerID string, batchSize int) ([]models.RelayRequest, error) {
+	return s.LeaseRequests(ctx, peerID, batchSize, 30*time.Second)
+}
+
 func (s *SQLite) QueueLength(ctx context.Context, peerID string) (int64, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_queue WHERE peer_id = ?`, peerID)
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM request_queue q
+		JOIN requests r ON r.id = q.request_id
+		WHERE q.peer_id = ? AND r.status != ?
+	`, peerID, string(models.StatusCompleted))
 	var count int64
 	if err := row.Scan(&count); err != nil {
 		return 0, err
@@ -541,12 +608,17 @@ func (s *SQLite) UpdateRequestStatus(ctx context.Context, requestID string, stat
 }
 
 func (s *SQLite) AckRequests(ctx context.Context, requestIDs []string) error {
+	now := time.Now()
+	states := make([]models.RequestSyncState, 0, len(requestIDs))
 	for _, id := range requestIDs {
-		if _, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ? WHERE id = ?`, string(models.StatusExecuting), id); err != nil {
-			return err
-		}
+		states = append(states, models.RequestSyncState{
+			RequestID:  id,
+			Status:     models.StatusReceived,
+			LeaseUntil: now.Add(30 * time.Second),
+			UpdatedAt:  now,
+		})
 	}
-	return nil
+	return s.ApplyRequestStates(ctx, states)
 }
 
 func (s *SQLite) PushResult(ctx context.Context, result *models.RelayResult) error {
@@ -554,58 +626,193 @@ func (s *SQLite) PushResult(ctx context.Context, result *models.RelayResult) err
 	if err != nil {
 		return fmt.Errorf("marshal result: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO pending_results (request_id, data) VALUES (?, ?)`, result.RequestID, string(data))
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO pending_results (request_id, data, delivery_status, lease_until, updated_at)
+		VALUES (?, ?, ?, 0, ?)
+		ON CONFLICT(request_id) DO UPDATE SET
+			data = excluded.data,
+			delivery_status = excluded.delivery_status,
+			lease_until = excluded.lease_until,
+			updated_at = excluded.updated_at
+	`, result.RequestID, string(data), string(models.ResultPending), time.Now().Unix())
 	return err
 }
 
-func (s *SQLite) PopResults(ctx context.Context, maxCount int) ([]models.RelayResult, error) {
+func (s *SQLite) LeaseResults(ctx context.Context, maxCount int, leaseTTL time.Duration) ([]models.RelayResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin pop results tx: %w", err)
+		return nil, fmt.Errorf("begin lease results tx: %w", err)
 	}
 	defer tx.Rollback()
 
+	now := time.Now().Unix()
+	leaseUntil := time.Now().Add(leaseTTL).Unix()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT seq, data FROM pending_results
+		SELECT request_id, data
+		FROM pending_results
+		WHERE delivery_status = ? OR (delivery_status = ? AND lease_until <= ?)
 		ORDER BY seq ASC
 		LIMIT ?
-	`, maxCount)
+	`, string(models.ResultPending), string(models.ResultLeased), now, maxCount)
 	if err != nil {
-		return nil, fmt.Errorf("query pending results: %w", err)
+		return nil, fmt.Errorf("query lease results: %w", err)
 	}
 	defer rows.Close()
 
-	var (
-		seqs    []int64
-		results []models.RelayResult
-	)
+	var results []models.RelayResult
 	for rows.Next() {
-		var seq int64
+		var requestID string
 		var data string
-		if err := rows.Scan(&seq, &data); err != nil {
-			return nil, fmt.Errorf("scan pending result: %w", err)
+		if err := rows.Scan(&requestID, &data); err != nil {
+			return nil, fmt.Errorf("scan lease result: %w", err)
 		}
 		var result models.RelayResult
 		if err := json.Unmarshal([]byte(data), &result); err != nil {
 			continue
 		}
-		seqs = append(seqs, seq)
 		results = append(results, result)
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE pending_results
+			SET delivery_status = ?, lease_until = ?, updated_at = ?
+			WHERE request_id = ?
+		`, string(models.ResultLeased), leaseUntil, now, requestID); err != nil {
+			return nil, fmt.Errorf("update leased result: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	for _, seq := range seqs {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_results WHERE seq = ?`, seq); err != nil {
-			return nil, fmt.Errorf("delete popped pending result: %w", err)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit lease results tx: %w", err)
+	}
+	return results, nil
+}
+
+func (s *SQLite) AckResults(ctx context.Context, resultIDs []string) error {
+	if len(resultIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin ack results tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, id := range resultIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_results WHERE request_id = ?`, id); err != nil {
+			return fmt.Errorf("delete acked result: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sender_request_states WHERE request_id = ?`, id); err != nil {
+			return fmt.Errorf("delete sender request state: %w", err)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit pop results tx: %w", err)
+	return tx.Commit()
+}
+
+func (s *SQLite) ResultPending(ctx context.Context, requestID string) (bool, error) {
+	count, err := s.count(ctx, `SELECT COUNT(*) FROM pending_results WHERE request_id = ?`, requestID)
+	return count > 0, err
+}
+
+func (s *SQLite) StoreSenderRequestState(ctx context.Context, state *models.RequestSyncState) error {
+	if state == nil {
+		return nil
 	}
-	return results, nil
+
+	updatedAt := state.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+
+	leaseUntil := int64(0)
+	if !state.LeaseUntil.IsZero() {
+		leaseUntil = state.LeaseUntil.Unix()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sender_request_states (request_id, status, lease_until, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(request_id) DO UPDATE SET
+			status = excluded.status,
+			lease_until = excluded.lease_until,
+			updated_at = excluded.updated_at
+	`, state.RequestID, string(state.Status), leaseUntil, updatedAt.Unix())
+	return err
+}
+
+func (s *SQLite) GetSenderRequestState(ctx context.Context, requestID string) (*models.RequestSyncState, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT status, lease_until, updated_at
+		FROM sender_request_states
+		WHERE request_id = ?
+	`, requestID)
+
+	var status string
+	var leaseUntil int64
+	var updatedAt int64
+	if err := row.Scan(&status, &leaseUntil, &updatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	state := &models.RequestSyncState{
+		RequestID: requestID,
+		Status:    models.RequestStatus(status),
+		UpdatedAt: time.Unix(updatedAt, 0),
+	}
+	if leaseUntil > 0 {
+		state.LeaseUntil = time.Unix(leaseUntil, 0)
+	}
+	return state, nil
+}
+
+func (s *SQLite) ListSenderRequestStates(ctx context.Context) ([]models.RequestSyncState, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT request_id, status, lease_until, updated_at
+		FROM sender_request_states
+		ORDER BY updated_at ASC, request_id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var states []models.RequestSyncState
+	for rows.Next() {
+		var state models.RequestSyncState
+		var leaseUntil int64
+		var updatedAt int64
+		var status string
+		if err := rows.Scan(&state.RequestID, &status, &leaseUntil, &updatedAt); err != nil {
+			return nil, err
+		}
+		state.Status = models.RequestStatus(status)
+		state.UpdatedAt = time.Unix(updatedAt, 0)
+		if leaseUntil > 0 {
+			state.LeaseUntil = time.Unix(leaseUntil, 0)
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
+}
+
+func (s *SQLite) DeleteSenderRequestStates(ctx context.Context, requestIDs []string) error {
+	for _, id := range requestIDs {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM sender_request_states WHERE request_id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SQLite) PopResults(ctx context.Context, maxCount int) ([]models.RelayResult, error) {
+	return s.LeaseResults(ctx, maxCount, 30*time.Second)
 }
 
 func (s *SQLite) PendingResultsCount(ctx context.Context) (int64, error) {
@@ -613,41 +820,11 @@ func (s *SQLite) PendingResultsCount(ctx context.Context) (int64, error) {
 }
 
 func (s *SQLite) RePushResults(ctx context.Context, results []models.RelayResult) error {
-	if len(results) == 0 {
-		return nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin repush results tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	minSeq := int64(0)
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(seq), 0) FROM pending_results`).Scan(&minSeq); err != nil {
-		return fmt.Errorf("query pending result min seq: %w", err)
-	}
-	nextSeq := minSeq - 1
-	for i := len(results) - 1; i >= 0; i-- {
-		data, err := json.Marshal(results[i])
-		if err != nil {
-			return fmt.Errorf("marshal repush result: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO pending_results (seq, request_id, data)
-			VALUES (?, ?, ?)
-		`, nextSeq, results[i].RequestID, string(data)); err != nil {
-			return fmt.Errorf("repush result: %w", err)
-		}
-		nextSeq--
-	}
-
-	return tx.Commit()
+	return nil
 }
 
 func (s *SQLite) DeleteAckedResults(ctx context.Context, resultIDs []string) {
-	_ = ctx
-	_ = resultIDs
+	_ = s.AckResults(ctx, resultIDs)
 }
 
 func (s *SQLite) StoreResult(ctx context.Context, result *models.RelayResult, ttlSeconds int) error {
@@ -672,6 +849,9 @@ func (s *SQLite) StoreResult(ctx context.Context, result *models.RelayResult, tt
 
 	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = ? WHERE id = ?`, string(models.StatusCompleted), result.RequestID); err != nil {
 		return fmt.Errorf("update completed status: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM request_queue WHERE request_id = ?`, result.RequestID); err != nil {
+		return fmt.Errorf("delete completed request from queue: %w", err)
 	}
 
 	return tx.Commit()

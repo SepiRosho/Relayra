@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/proxy"
 	"github.com/relayra/relayra/internal/store"
 )
@@ -60,8 +61,8 @@ type proxyUpdatedMsg struct {
 }
 
 // NewProxyDetailView creates a detail view for a specific proxy.
-func NewProxyDetailView(rdb store.Backend, proxyURL string) *ProxyDetailView {
-	mgr := proxy.NewManager(rdb)
+func NewProxyDetailView(cfg *config.Config, rdb store.Backend, proxyURL string) *ProxyDetailView {
+	mgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
 
 	pd := &ProxyDetailView{
 		manager:  mgr,

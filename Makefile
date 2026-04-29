@@ -1,4 +1,4 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION ?= 0.1.1
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 MODULE := github.com/relayra/relayra

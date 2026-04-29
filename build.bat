@@ -8,9 +8,10 @@ set HTTP_PROXY=http://127.0.0.1:3066
 set HTTPS_PROXY=http://127.0.0.1:3066
 set GOOS=linux
 set GOARCH=amd64
+set VERSION=0.1.1
 
-set "DIST=dist\relayra-dev-linux-amd64"
-set "ARCHIVE=dist\relayra-dev-linux-amd64.tar.gz"
+set "DIST=dist\relayra-%VERSION%-linux-amd64"
+set "ARCHIVE=dist\relayra-%VERSION%-linux-amd64.tar.gz"
 
 echo [1/4] Cleaning old build...
 if exist "%DIST%" rmdir /s /q "%DIST%"
@@ -18,7 +19,7 @@ if exist "%ARCHIVE%" del /q "%ARCHIVE%"
 
 echo [2/4] Compiling for linux/amd64...
 mkdir "%DIST%\scripts" 2>nul
-go build -o "%DIST%\relayra" ./cmd/relayra
+go build -ldflags "-X github.com/relayra/relayra/internal/cli.Version=%VERSION%" -o "%DIST%\relayra" ./cmd/relayra
 if errorlevel 1 (
     echo BUILD FAILED
     exit /b 1
@@ -33,9 +34,9 @@ copy /y scripts\test-webhook.sh "%DIST%\scripts\" >nul
 
 echo [4/4] Creating tar.gz...
 cd dist
-tar czf relayra-dev-linux-amd64.tar.gz relayra-dev-linux-amd64
+tar czf relayra-%VERSION%-linux-amd64.tar.gz relayra-%VERSION%-linux-amd64
 
 echo.
 echo === Build complete ===
-for %%F in (relayra-dev-linux-amd64.tar.gz) do echo Output: dist\%%F (%%~zF bytes)
+for %%F in (relayra-%VERSION%-linux-amd64.tar.gz) do echo Output: dist\%%F (%%~zF bytes)
 echo.

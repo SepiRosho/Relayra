@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/proxy"
 	"github.com/relayra/relayra/internal/store"
 )
@@ -20,6 +21,7 @@ type ProxyView struct {
 	ready      bool
 	showDetail bool
 	detail     *ProxyDetailView
+	cfg        *config.Config
 }
 
 type proxyRow struct {
@@ -35,9 +37,9 @@ type proxiesLoadedMsg struct {
 }
 
 // NewProxyView creates a new proxy management view.
-func NewProxyView(rdb store.Backend) *ProxyView {
-	mgr := proxy.NewManager(rdb)
-	return &ProxyView{manager: mgr, rdb: rdb}
+func NewProxyView(cfg *config.Config, rdb store.Backend) *ProxyView {
+	mgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
+	return &ProxyView{manager: mgr, rdb: rdb, cfg: cfg}
 }
 
 func (pv *ProxyView) Init() tea.Cmd {
@@ -122,7 +124,7 @@ func (pv *ProxyView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(pv.proxies) > 0 && pv.cursor < len(pv.proxies) {
 				pv.showDetail = true
-				pv.detail = NewProxyDetailView(pv.rdb, pv.proxies[pv.cursor].URL)
+				pv.detail = NewProxyDetailView(pv.cfg, pv.rdb, pv.proxies[pv.cursor].URL)
 				return pv, pv.detail.Init()
 			}
 		case "r":

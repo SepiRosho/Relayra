@@ -19,6 +19,7 @@ It connects two roles:
 - `sender`: restricted node that polls outbound, executes local requests, and returns results
 
 Relay payloads are encrypted (`AES-256-GCM`), senders can use proxy chains, and operators can work through both CLI and TUI.
+Relayra now uses durable lease/ack delivery with request/result ID dedupe so transient proxy outages bias toward re-delivery instead of silent loss.
 
 ## Why Relayra
 
@@ -36,7 +37,7 @@ flowchart LR
     C[Client / Automation] -->|POST /api/v1/relay| L[Listener]
     L -->|Queue request| S[(Redis or SQLite)]
     R[Restricted Network] --> D[Sender]
-    D -->|Long poll /api/v1/poll| L
+    D -->|Interval / Long poll / WebSocket| L
     D -->|Execute local HTTP request| T[Target Service]
     D -->|Encrypted result payload| L
     L -->|GET /api/v1/result or webhook| C
@@ -47,10 +48,10 @@ flowchart LR
 | Area | What you get |
 | --- | --- |
 | Pairing | One-time pairing tokens with capability exchange |
-| Transport | Polling + long polling, proxy-aware sender connectivity |
+| Transport | Interval polling, long polling, or WebSocket with long-poll fallback |
 | Security | Encrypted poll payloads and optional API token auth |
 | Execution | Async relay execution and optional listener-side execution |
-| Delivery | Result polling and webhook callbacks with retries |
+| Delivery | Durable leased delivery, reconnect reconciliation, result polling, and webhook callbacks |
 | Storage | Backend selection: `redis` or `sqlite` |
 | Operations | CLI workflows and Bubble Tea TUI for day-to-day use |
 
@@ -85,7 +86,7 @@ sudo ./install.sh
 relayra
 ```
 
-The wizard configures role, storage backend, network, logging, and execution policy.
+The wizard configures role, storage backend, network, sender transport mode, proxy cooldown, logging, and execution policy.
 
 ### 4. Pair listener and sender
 
@@ -115,6 +116,11 @@ relayra service install
 relayra service start
 relayra service status
 ```
+
+## Upgrade Note
+
+This release changes the sender/listener delivery state model.
+Upgrade during a drained maintenance window: let queued work finish before deploying the new version.
 
 ## API Example
 
@@ -163,9 +169,9 @@ Listener-side execution is supported when enabled (`destination_peer_id`: `liste
 
 - Sender requires outbound connectivity only; inbound access is not required.
 - Pairing uses one-time token exchange and derives encryption keys for payload transport.
-- Poll request/response payloads are encrypted with AES-256-GCM.
+- Poll and WebSocket request/response payloads are encrypted with AES-256-GCM.
 - Protected endpoints (`/api/v1/relay`, `/api/v1/result/{id}`, `/api/v1/peers`) enforce Bearer tokens after the first token is created.
-- Open endpoints include `/health`, `/api/v1/poll`, `/api/v1/pair`.
+- Open endpoints include `/health`, `/api/v1/poll`, `/api/v1/ws`, `/api/v1/pair`.
 
 ## Configuration
 
@@ -177,7 +183,9 @@ RELAYRA_LISTEN_ADDR=0.0.0.0
 RELAYRA_LISTEN_PORT=8443
 RELAYRA_STORAGE_BACKEND=sqlite
 RELAYRA_SQLITE_PATH=/opt/relayra/relayra.db
-RELAYRA_LONG_POLLING=true
+RELAYRA_TRANSPORT_MODE=websocket
+RELAYRA_LONG_POLL_WAIT=30
+RELAYRA_PROXY_COOLDOWN_SECONDS=300
 RELAYRA_ALLOW_LISTENER_EXECUTION=false
 ```
 

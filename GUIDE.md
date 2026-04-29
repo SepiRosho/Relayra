@@ -8,6 +8,7 @@ Relayra bridges HTTP requests between two machines:
 - `sender`: restricted machine that polls the listener, executes requests locally, and returns the results
 
 Relay payloads are encrypted with AES-256-GCM. Senders can connect through HTTP or SOCKS5 proxies, and Relayra can store state in Redis or SQLite.
+Relayra uses durable lease/ack delivery with request/result ID dedupe so temporary proxy outages bias toward replay instead of silent loss.
 
 ## Core Concepts
 
@@ -27,9 +28,9 @@ The sender:
 
 - connects outbound to the listener
 - can use configured proxies
-- receives relay jobs over polling or long polling
+- receives relay jobs over interval polling, long polling, or WebSocket
 - executes requests locally
-- sends finished results back on the next available poll
+- sends finished results back over the next successful sync cycle
 
 ### Async Requests
 
@@ -70,6 +71,7 @@ The setup wizard will ask for:
 - instance name
 - storage backend: Redis or SQLite
 - Redis settings if Redis is selected
+- sender transport mode and proxy cooldown on sender nodes
 - log level
 - listener-side execution policy on listener nodes
 
@@ -101,7 +103,7 @@ Then pair:
 relayra pair connect <token>
 ```
 
-Pairing exchanges capabilities as well, so each side can see whether the other supports long polling, async execution, storage type, and listener-side execution.
+Pairing exchanges capabilities as well, so each side can see whether the other supports long polling, WebSocket transport, async execution, storage type, and listener-side execution.
 
 ## Running Relayra
 
@@ -189,6 +191,7 @@ curl http://listener-ip:port/api/v1/result/<request-id>
 ### Webhook Delivery
 
 If `webhook_url` is included in the relay request, Relayra will POST the result when it is ready and retry on failure.
+Results remain durable on the sender until the listener acknowledges receipt.
 
 ## API Authentication
 
@@ -216,6 +219,7 @@ Open endpoints:
 
 - `GET /health`
 - `POST /api/v1/poll`
+- `GET /api/v1/ws`
 - `POST /api/v1/pair`
 
 ## Proxy Operations
@@ -301,10 +305,19 @@ The sender peers screen shows the connected listener and its advertised capabili
 | `RELAYRA_POLL_INTERVAL` | `5` | Standard poll interval in seconds |
 | `RELAYRA_POLL_BATCH_SIZE` | `10` | Max requests returned per poll |
 | `RELAYRA_REQUEST_TIMEOUT` | `30` | HTTP execution timeout in seconds |
-| `RELAYRA_LONG_POLLING` | `true` | Enable long polling on senders |
+| `RELAYRA_TRANSPORT_MODE` | `long-poll` | `interval`, `long-poll`, or `websocket` |
+| `RELAYRA_LONG_POLLING` | `true` | Legacy compatibility shim if `RELAYRA_TRANSPORT_MODE` is unset |
 | `RELAYRA_LONG_POLL_WAIT` | `30` | Max long-poll wait window in seconds |
+| `RELAYRA_PROXY_COOLDOWN_SECONDS` | `300` | Proxy cooldown after 3 consecutive failures |
 | `RELAYRA_ASYNC_WORKERS` | `4` | Max concurrent async request workers |
 | `RELAYRA_ALLOW_LISTENER_EXECUTION` | `false` | Allow listener-side request execution |
+
+## Reliability and Upgrades
+
+- Relayra now keeps queued requests and pending results durable until explicit acknowledgement.
+- Sender reconnects reconcile request states and pending results using request/result IDs.
+- Delivery is intentionally biased toward at-least-once behavior, not exactly-once execution against downstream HTTP services.
+- Upgrade this release during a drained maintenance window: finish queued work before rolling out the new binaries.
 
 ### Logging and Results
 

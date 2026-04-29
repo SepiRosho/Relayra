@@ -27,8 +27,18 @@ type RequestStatus string
 const (
 	StatusPending   RequestStatus = "pending"
 	StatusQueued    RequestStatus = "queued"
-	StatusSent      RequestStatus = "sent" // Sent to Sender in a poll batch
+	StatusLeased    RequestStatus = "leased"
+	StatusReceived  RequestStatus = "received"
 	StatusExecuting RequestStatus = "executing"
 	StatusCompleted RequestStatus = "completed"
 	StatusFailed    RequestStatus = "failed"
 )
+
+// RequestSyncState tracks the Sender-side durable state for a request.
+type RequestSyncState struct {
+	RequestID   string        `json:"request_id"`
+	Status      RequestStatus `json:"status"`
+	LeaseUntil  time.Time     `json:"lease_until,omitempty"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	DuplicateOK bool          `json:"duplicate_ok,omitempty"`
+}

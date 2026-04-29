@@ -42,7 +42,7 @@ var proxyAddCmd = &cobra.Command{
 		_ = cfg
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb)
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
 
 		// Auto-assign priority based on current count
 		count, _ := mgr.Count(ctx)
@@ -62,14 +62,14 @@ var proxyRemoveCmd = &cobra.Command{
 	Short: "Remove a proxy",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, rdb, err := loadSenderConfig()
+		cfg, rdb, err := loadSenderConfig()
 		if err != nil {
 			return err
 		}
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb)
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
 
 		if err := mgr.Remove(ctx, args[0]); err != nil {
 			return err
@@ -84,14 +84,14 @@ var proxyListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all proxies with health status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, rdb, err := loadSenderConfig()
+		cfg, rdb, err := loadSenderConfig()
 		if err != nil {
 			return err
 		}
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb)
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
 
 		proxies, err := mgr.List(ctx)
 		if err != nil {
@@ -126,14 +126,14 @@ var proxyTestCmd = &cobra.Command{
 	Short: "Test proxy connectivity (tests specific proxy or all if no arg)",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, rdb, err := loadSenderConfig()
+		cfg, rdb, err := loadSenderConfig()
 		if err != nil {
 			return err
 		}
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb)
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
 
 		if len(args) == 1 {
 			// Test specific proxy
@@ -173,14 +173,14 @@ var proxyResetCooldownCmd = &cobra.Command{
 	Use:   "reset-cooldown",
 	Short: "Reset failure cooldowns for all proxies",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, rdb, err := loadSenderConfig()
+		cfg, rdb, err := loadSenderConfig()
 		if err != nil {
 			return err
 		}
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb)
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
 
 		count, err := mgr.ResetAllCooldowns(ctx)
 		if err != nil {
@@ -208,7 +208,7 @@ var proxyTestLongPollCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb)
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
 		listener, err := rdb.GetListenerInfo(ctx)
 		if err != nil || listener == nil {
 			return fmt.Errorf("no listener paired. Run 'relayra pair connect <token>' first")

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,10 +27,8 @@ type Handlers struct {
 	cfg *config.Config
 }
 
-// Health is a simple health check endpoint.
 func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
 	ctx := logger.WithComponent(r.Context(), "server")
-
 	if err := h.rdb.Health(ctx); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "unhealthy",
@@ -45,11 +44,10 @@ func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Relay accepts a new relay request and queues it for a peer.
 func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 	ctx := logger.WithComponent(r.Context(), "server")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 50*1024*1024)) // 50MB max
+	body, err := io.ReadAll(io.LimitReader(r.Body, 50*1024*1024))
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to read relay request body", "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read request body"})
@@ -62,13 +60,11 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		Async             bool               `json:"async,omitempty"`
 		Request           models.HTTPRequest `json:"request"`
 	}
-
 	if err := json.Unmarshal(body, &req); err != nil {
 		slog.ErrorContext(ctx, "invalid relay request JSON", "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-
 	if req.DestinationPeerID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "destination_peer_id is required"})
 		return
@@ -78,12 +74,11 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Request.Method == "" {
-		req.Request.Method = "GET"
+		req.Request.Method = http.MethodGet
 	}
 
-	// Generate request ID
 	idBytes := make([]byte, 16)
-	rand.Read(idBytes)
+	_, _ = rand.Read(idBytes)
 	requestID := hex.EncodeToString(idBytes)
 
 	relayReq := &models.RelayRequest{
@@ -101,9 +96,7 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 
 	if h.isListenerDestination(req.DestinationPeerID) {
 		if !h.cfg.AllowListenerExecution {
-			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "listener-side execution is disabled",
-			})
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "listener-side execution is disabled"})
 			return
 		}
 
@@ -116,14 +109,6 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		go h.executeLocalRequest(relayReq)
-
-		slog.InfoContext(ctx, "listener accepted local relay request",
-			"url", req.Request.URL,
-			"method", req.Request.Method,
-			"has_webhook", req.WebhookURL != "",
-			"async", req.Async,
-		)
-
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"request_id": requestID,
 			"status":     "executing",
@@ -132,7 +117,6 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify peer exists
 	if peer, err := h.rdb.GetPeer(ctx, req.DestinationPeerID); err != nil || peer == nil {
 		slog.WarnContext(ctx, "relay to unknown peer", "peer_id", req.DestinationPeerID)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
@@ -145,12 +129,6 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.InfoContext(ctx, "relay request accepted",
-		"url", req.Request.URL,
-		"method", req.Request.Method,
-		"has_webhook", req.WebhookURL != "",
-	)
-
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"request_id": requestID,
 		"status":     "queued",
@@ -158,7 +136,6 @@ func (h *Handlers) Relay(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetResult returns the result of a relay request.
 func (h *Handlers) GetResult(w http.ResponseWriter, r *http.Request) {
 	ctx := logger.WithComponent(r.Context(), "server")
 	requestID := r.PathValue("requestID")
@@ -168,18 +145,14 @@ func (h *Handlers) GetResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx = logger.WithRequestID(ctx, requestID)
-
-	// Check if result exists
 	result, err := h.rdb.GetResult(ctx, requestID)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to get result", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-
 	if result != nil {
 		ttl, _ := h.rdb.GetResultTTL(ctx, requestID)
-		slog.InfoContext(ctx, "result returned to client", "status_code", result.StatusCode, "ttl_remaining", ttl)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"request_id":    requestID,
 			"status":        "completed",
@@ -189,10 +162,8 @@ func (h *Handlers) GetResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No result yet — check request status
 	status, err := h.rdb.GetRequestStatus(ctx, requestID)
 	if err != nil {
-		slog.DebugContext(ctx, "request not found")
 		writeJSON(w, http.StatusNotFound, map[string]string{
 			"error":      "request not found",
 			"request_id": requestID,
@@ -200,7 +171,6 @@ func (h *Handlers) GetResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.DebugContext(ctx, "result not ready", "status", status)
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{
 		"request_id": requestID,
 		"status":     status,
@@ -208,120 +178,31 @@ func (h *Handlers) GetResult(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Poll handles the Sender's polling request — receives results, sends new requests.
 func (h *Handlers) Poll(w http.ResponseWriter, r *http.Request) {
 	ctx := logger.WithComponent(r.Context(), "server")
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 50*1024*1024))
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to read poll body", "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
 		return
 	}
 
 	var pollReq models.PollRequest
 	if err := json.Unmarshal(body, &pollReq); err != nil {
-		slog.ErrorContext(ctx, "invalid poll JSON", "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
 
-	ctx = logger.WithPeerID(ctx, pollReq.PeerID)
-
-	// Get peer for decryption
-	peer, err := h.rdb.GetPeer(ctx, pollReq.PeerID)
-	if err != nil || peer == nil {
-		slog.WarnContext(ctx, "poll from unknown peer")
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unknown peer"})
-		return
-	}
-
-	// Update last seen
-	h.rdb.UpdatePeerLastSeen(ctx, pollReq.PeerID)
-
-	// Decrypt incoming payload
-	var payloadUp models.PollPayloadUp
-	if err := crypto.DecryptJSON(peer.EncryptionKey, pollReq.Payload, pollReq.Nonce, pollReq.Timestamp, &payloadUp); err != nil {
-		slog.ErrorContext(ctx, "failed to decrypt poll payload", "error", err)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decryption failed"})
-		return
-	}
-
-	slog.InfoContext(ctx, "poll received",
-		"results_count", len(payloadUp.Results),
-		"ack_count", len(payloadUp.AckRequestIDs),
-	)
-
-	// Process incoming results
-	var ackResultIDs []string
-	for _, result := range payloadUp.Results {
-		resultCtx := logger.WithRequestID(ctx, result.RequestID)
-
-		if err := h.rdb.StoreResult(resultCtx, &result, h.cfg.ResultTTL); err != nil {
-			slog.ErrorContext(resultCtx, "failed to store result from poll", "error", err)
-			continue
-		}
-		ackResultIDs = append(ackResultIDs, result.RequestID)
-
-		// Trigger webhook delivery asynchronously
-		// Use a detached context — the HTTP request context will be cancelled
-		// when this handler returns, which would kill the webhook goroutine.
-		webhookURL, _ := h.rdb.GetRequestWebhookURL(resultCtx, result.RequestID)
-		if webhookURL != "" {
-			webhookCtx := logger.WithComponent(context.Background(), "webhook")
-			webhookCtx = logger.WithRequestID(webhookCtx, result.RequestID)
-			webhookCtx = logger.WithPeerID(webhookCtx, pollReq.PeerID)
-			resultCopy := result // capture loop variable
-			go webhook.Deliver(webhookCtx, h.rdb, webhookURL, result.RequestID, &resultCopy, h.cfg.WebhookMaxRetries)
-		}
-	}
-
-	// Process acks (Sender confirms it received these requests)
-	if len(payloadUp.AckRequestIDs) > 0 {
-		h.rdb.AckRequests(ctx, payloadUp.AckRequestIDs)
-	}
-
-	if pollReq.WaitSeconds > 0 && len(ackResultIDs) == 0 {
-		waitSeconds := pollReq.WaitSeconds
-		if waitSeconds > h.cfg.LongPollWait {
-			waitSeconds = h.cfg.LongPollWait
-		}
-		h.waitForQueuedRequests(ctx, pollReq.PeerID, time.Duration(waitSeconds)*time.Second)
-	}
-
-	// Dequeue new batch for this peer
-	requests, err := h.rdb.DequeueRequests(ctx, pollReq.PeerID, h.cfg.PollBatchSize)
+	pollResp, err := h.handlePollMessage(ctx, pollReq.PeerID, pollReq.Payload, pollReq.Nonce, pollReq.Timestamp, pollReq.WaitSeconds)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to dequeue requests", "error", err)
-		requests = nil // Continue with empty batch
-	}
-
-	// Build response payload
-	payloadDown := models.PollPayloadDown{
-		Requests:     requests,
-		AckResultIDs: ackResultIDs,
-	}
-
-	ciphertext, nonce, timestamp, err := crypto.EncryptJSON(peer.EncryptionKey, &payloadDown)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to encrypt poll response", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encryption failed"})
+		slog.ErrorContext(ctx, "failed to handle poll request", "error", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	slog.InfoContext(ctx, "poll response",
-		"new_requests", len(requests),
-		"acked_results", len(ackResultIDs),
-	)
-
-	writeJSON(w, http.StatusOK, models.PollResponse{
-		Nonce:     nonce,
-		Timestamp: timestamp,
-		Payload:   ciphertext,
-	})
+	writeJSON(w, http.StatusOK, pollResp)
 }
 
-// Pair handles pairing requests from Sender instances.
 func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 	ctx := logger.WithComponent(r.Context(), "pairing")
 
@@ -337,26 +218,16 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.InfoContext(ctx, "pairing request received",
-		"sender_name", pairReq.Name,
-		"sender_machine_id", pairReq.MachineID[:12]+"...",
-	)
-
-	// Validate pairing token
 	secretHash := crypto.HashSecret(pairReq.Secret)
 	token, err := h.rdb.GetPairingToken(ctx, secretHash)
 	if err != nil {
-		slog.WarnContext(ctx, "pairing token validation failed", "error", err)
 		writeJSON(w, http.StatusUnauthorized, models.PairingResponse{
 			Success: false,
 			Error:   "invalid or expired pairing token",
 		})
 		return
 	}
-
-	// Check expiry
 	if time.Now().Unix() > token.ExpiresAt {
-		slog.WarnContext(ctx, "pairing token expired")
 		writeJSON(w, http.StatusUnauthorized, models.PairingResponse{
 			Success: false,
 			Error:   "pairing token expired",
@@ -364,10 +235,8 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Derive encryption key
 	encKey, err := crypto.DeriveKey(pairReq.Secret, h.cfg.MachineID, pairReq.MachineID)
 	if err != nil {
-		slog.ErrorContext(ctx, "key derivation failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.PairingResponse{
 			Success: false,
 			Error:   "key derivation failed",
@@ -375,12 +244,10 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate peer ID (short, derived from machine ID)
 	peerIDBytes := make([]byte, 8)
-	rand.Read(peerIDBytes)
+	_, _ = rand.Read(peerIDBytes)
 	peerID := hex.EncodeToString(peerIDBytes)
 
-	// Store peer
 	peer := &models.Peer{
 		ID:            peerID,
 		Name:          pairReq.Name,
@@ -391,20 +258,13 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 		RegisteredAt:  time.Now(),
 		LastSeen:      time.Now(),
 	}
-
 	if err := h.rdb.StorePeer(ctx, peer); err != nil {
-		slog.ErrorContext(ctx, "failed to store peer", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.PairingResponse{
 			Success: false,
 			Error:   "failed to register peer",
 		})
 		return
 	}
-
-	slog.InfoContext(ctx, "peer paired successfully",
-		"peer_id", peerID,
-		"sender_name", pairReq.Name,
-	)
 
 	writeJSON(w, http.StatusOK, models.PairingResponse{
 		PeerID:       peerID,
@@ -416,13 +276,11 @@ func (h *Handlers) Pair(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListPeers returns all registered peers.
 func (h *Handlers) ListPeers(w http.ResponseWriter, r *http.Request) {
 	ctx := logger.WithComponent(r.Context(), "server")
 
 	peers, err := h.rdb.ListPeers(ctx)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to list peers", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list peers"})
 		return
 	}
@@ -460,7 +318,7 @@ func (h *Handlers) ListPeers(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func (h *Handlers) executeLocalRequest(req *models.RelayRequest) {
@@ -510,4 +368,93 @@ func (h *Handlers) waitForQueuedRequests(ctx context.Context, peerID string, tim
 		case <-ticker.C:
 		}
 	}
+}
+
+func (h *Handlers) requestLeaseDuration() time.Duration {
+	seconds := h.cfg.RequestTimeout + h.cfg.LongPollWait + h.cfg.PollInterval + 30
+	if seconds < h.cfg.RequestTimeout+30 {
+		seconds = h.cfg.RequestTimeout + 30
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (h *Handlers) handlePollMessage(ctx context.Context, peerID, payload, nonce string, timestamp int64, waitSeconds int) (*models.PollResponse, error) {
+	ctx = logger.WithPeerID(ctx, peerID)
+
+	peer, err := h.rdb.GetPeer(ctx, peerID)
+	if err != nil || peer == nil {
+		return nil, fmt.Errorf("unknown peer")
+	}
+
+	_ = h.rdb.UpdatePeerLastSeen(ctx, peerID)
+
+	var payloadUp models.PollPayloadUp
+	if err := crypto.DecryptJSON(peer.EncryptionKey, payload, nonce, timestamp, &payloadUp); err != nil {
+		return nil, fmt.Errorf("decryption failed")
+	}
+
+	slog.InfoContext(ctx, "poll received",
+		"results_count", len(payloadUp.Results),
+		"request_states", len(payloadUp.RequestStates),
+	)
+
+	payloadDown, err := h.processPollPayload(ctx, peerID, &payloadUp, waitSeconds)
+	if err != nil {
+		return nil, err
+	}
+
+	ciphertext, respNonce, respTimestamp, err := crypto.EncryptJSON(peer.EncryptionKey, payloadDown)
+	if err != nil {
+		return nil, fmt.Errorf("encryption failed")
+	}
+
+	return &models.PollResponse{
+		Nonce:     respNonce,
+		Timestamp: respTimestamp,
+		Payload:   ciphertext,
+	}, nil
+}
+
+func (h *Handlers) processPollPayload(ctx context.Context, peerID string, payloadUp *models.PollPayloadUp, waitSeconds int) (*models.PollPayloadDown, error) {
+	if len(payloadUp.RequestStates) > 0 {
+		if err := h.rdb.ApplyRequestStates(ctx, payloadUp.RequestStates); err != nil {
+			return nil, err
+		}
+	}
+
+	var ackResultIDs []string
+	for _, result := range payloadUp.Results {
+		resultCtx := logger.WithRequestID(ctx, result.RequestID)
+		if err := h.rdb.StoreResult(resultCtx, &result, h.cfg.ResultTTL); err != nil {
+			slog.ErrorContext(resultCtx, "failed to store result from sender", "error", err)
+			continue
+		}
+		ackResultIDs = append(ackResultIDs, result.RequestID)
+
+		webhookURL, _ := h.rdb.GetRequestWebhookURL(resultCtx, result.RequestID)
+		if webhookURL != "" {
+			webhookCtx := logger.WithComponent(context.Background(), "webhook")
+			webhookCtx = logger.WithRequestID(webhookCtx, result.RequestID)
+			webhookCtx = logger.WithPeerID(webhookCtx, peerID)
+			resultCopy := result
+			go webhook.Deliver(webhookCtx, h.rdb, webhookURL, result.RequestID, &resultCopy, h.cfg.WebhookMaxRetries)
+		}
+	}
+
+	if waitSeconds > 0 && len(ackResultIDs) == 0 {
+		if waitSeconds > h.cfg.LongPollWait {
+			waitSeconds = h.cfg.LongPollWait
+		}
+		h.waitForQueuedRequests(ctx, peerID, time.Duration(waitSeconds)*time.Second)
+	}
+
+	requests, err := h.rdb.LeaseRequests(ctx, peerID, h.cfg.PollBatchSize, h.requestLeaseDuration())
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.PollPayloadDown{
+		Requests:     requests,
+		AckResultIDs: ackResultIDs,
+	}, nil
 }

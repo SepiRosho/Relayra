@@ -5,6 +5,13 @@
 # Build and distribution artifacts
 /build/
 /dist/
+/.gocache/
+/.gomodcache/
+/.cache/
+/cache/
+**/.cache/
+**/cache/
+*.cache
 /*.exe
 /*.dll
 /*.so

@@ -39,18 +39,23 @@ type Backend interface {
 
 	StoreRequestMetadata(ctx context.Context, peerID string, req *models.RelayRequest) error
 	EnqueueRequest(ctx context.Context, peerID string, req *models.RelayRequest) error
-	DequeueRequests(ctx context.Context, peerID string, batchSize int) ([]models.RelayRequest, error)
+	LeaseRequests(ctx context.Context, peerID string, batchSize int, leaseTTL time.Duration) ([]models.RelayRequest, error)
 	QueueLength(ctx context.Context, peerID string) (int64, error)
 	GetRequestStatus(ctx context.Context, requestID string) (models.RequestStatus, error)
 	GetRequestWebhookURL(ctx context.Context, requestID string) (string, error)
 	UpdateRequestStatus(ctx context.Context, requestID string, status models.RequestStatus) error
-	AckRequests(ctx context.Context, requestIDs []string) error
+	ApplyRequestStates(ctx context.Context, requestStates []models.RequestSyncState) error
 
 	PushResult(ctx context.Context, result *models.RelayResult) error
-	PopResults(ctx context.Context, maxCount int) ([]models.RelayResult, error)
+	LeaseResults(ctx context.Context, maxCount int, leaseTTL time.Duration) ([]models.RelayResult, error)
 	PendingResultsCount(ctx context.Context) (int64, error)
-	RePushResults(ctx context.Context, results []models.RelayResult) error
-	DeleteAckedResults(ctx context.Context, resultIDs []string)
+	AckResults(ctx context.Context, resultIDs []string) error
+	ResultPending(ctx context.Context, requestID string) (bool, error)
+
+	StoreSenderRequestState(ctx context.Context, state *models.RequestSyncState) error
+	GetSenderRequestState(ctx context.Context, requestID string) (*models.RequestSyncState, error)
+	ListSenderRequestStates(ctx context.Context) ([]models.RequestSyncState, error)
+	DeleteSenderRequestStates(ctx context.Context, requestIDs []string) error
 
 	StoreResult(ctx context.Context, result *models.RelayResult, ttlSeconds int) error
 	GetResult(ctx context.Context, requestID string) (*models.RelayResult, error)

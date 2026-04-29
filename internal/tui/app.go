@@ -189,7 +189,7 @@ func (a *App) selectMenuItem() (tea.Model, tea.Cmd) {
 		return a, a.peersView.Init()
 	case "Manage Proxies":
 		a.screen = ScreenProxies
-		a.proxyView = NewProxyView(a.rdb)
+		a.proxyView = NewProxyView(a.cfg, a.rdb)
 		return a, a.proxyView.Init()
 	case "API Tokens":
 		a.screen = ScreenTokens
