@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/relayra/relayra/internal/logger"
 	"github.com/relayra/relayra/internal/models"
+	"github.com/relayra/relayra/internal/store"
 	"github.com/relayra/relayra/internal/transport"
 )
 
@@ -234,6 +236,14 @@ func (s *wsServerSession) flushOutbox() error {
 	defer s.outboxMu.Unlock()
 
 	entries, err := s.handlers.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
+	if err != nil {
+		if errors.Is(err, store.ErrWSOutboxGap) {
+			if repairErr := s.handlers.rebuildListenerWSOutbox(context.Background(), s.peerID, s.lastSentSeq); repairErr != nil {
+				return fmt.Errorf("repair listener websocket outbox: %w", repairErr)
+			}
+			entries, err = s.handlers.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
+		}
+	}
 	if err != nil {
 		return err
 	}

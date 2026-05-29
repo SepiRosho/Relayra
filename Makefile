@@ -29,7 +29,9 @@ dist: build
 	@mkdir -p $(DIST_DIR)/$(BINARY)-$(VERSION)
 	@cp $(BUILD_DIR)/$(BINARY) $(DIST_DIR)/$(BINARY)-$(VERSION)/
 	@cp scripts/install.sh $(DIST_DIR)/$(BINARY)-$(VERSION)/
+	@cp scripts/upgrade.sh $(DIST_DIR)/$(BINARY)-$(VERSION)/
 	@chmod +x $(DIST_DIR)/$(BINARY)-$(VERSION)/install.sh
+	@chmod +x $(DIST_DIR)/$(BINARY)-$(VERSION)/upgrade.sh
 	@cp GUIDE.md $(DIST_DIR)/$(BINARY)-$(VERSION)/
 	@cd $(DIST_DIR) && tar czf $(BINARY)-$(VERSION)-linux-amd64.tar.gz $(BINARY)-$(VERSION)/
 	@rm -rf $(DIST_DIR)/$(BINARY)-$(VERSION)

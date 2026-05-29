@@ -440,6 +440,91 @@ func (h *Handlers) applySenderChunkReceiptWS(ctx context.Context, peerID string,
 	return h.queueNextChunkEvent(ctx, peerID, req)
 }
 
+func (h *Handlers) rebuildListenerWSOutbox(ctx context.Context, peerID string, afterSeq int64) error {
+	scope := models.ListenerWSScope(peerID)
+	if err := h.rdb.ResetWSOutbox(ctx, scope, afterSeq); err != nil {
+		return err
+	}
+
+	remaining := h.cfg.PollBatchSize
+	appendRequest := func(req models.RelayRequest) error {
+		if remaining < 1 {
+			return nil
+		}
+		needsChunking, _, err := transport.RequestNeedsChunking(req, h.cfg.TransportChunkSize())
+		if err != nil {
+			return err
+		}
+		if !needsChunking {
+			_, err = transport.EnqueueWSMessage(ctx, h.rdb, scope, &models.WSMessage{
+				Type:    models.WSMessageTypePushRequest,
+				PeerID:  peerID,
+				Request: &req,
+			}, req.ID)
+			if err == nil {
+				remaining--
+			}
+			return err
+		}
+
+		cursor, err := h.rdb.GetChunkCursor(ctx, models.RequestTransferID(req.ID))
+		if err != nil {
+			return err
+		}
+		nextIndex := 0
+		if cursor != nil {
+			nextIndex = cursor.NextIndex
+		}
+		chunk, err := transport.RequestChunkAt(req, h.cfg.TransportChunkSize(), nextIndex)
+		if err != nil {
+			if strings.Contains(err.Error(), "out of range") {
+				return nil
+			}
+			return err
+		}
+		_, err = transport.EnqueueWSMessage(ctx, h.rdb, scope, &models.WSMessage{
+			Type:   models.WSMessageTypePushChunk,
+			PeerID: peerID,
+			Chunk:  chunk,
+		}, fmt.Sprintf("%s:%d", chunk.TransferID, chunk.Index))
+		if err == nil {
+			remaining--
+		}
+		return err
+	}
+
+	active, err := h.rdb.ListActiveLeasedRequests(ctx, peerID, h.cfg.PollBatchSize)
+	if err != nil {
+		return err
+	}
+	for _, req := range active {
+		if remaining < 1 {
+			break
+		}
+		if err := appendRequest(req); err != nil {
+			return err
+		}
+	}
+
+	if remaining < 1 {
+		return nil
+	}
+
+	leased, err := h.rdb.LeaseRequests(ctx, peerID, remaining, h.requestLeaseDuration())
+	if err != nil {
+		return err
+	}
+	for _, req := range leased {
+		if remaining < 1 {
+			break
+		}
+		if err := appendRequest(req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *Handlers) waitForQueuedRequests(ctx context.Context, peerID string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(250 * time.Millisecond)

@@ -65,6 +65,58 @@ func (s *SQLite) EnqueueWSOutbox(ctx context.Context, scope string, seq int64, m
 	return nil
 }
 
+func (s *SQLite) AppendWSOutbox(ctx context.Context, scope string, msgType, refID, payload string) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin websocket outbox append tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().Unix()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO ws_sequence_states (scope, next_outbound_seq, last_received_seq, updated_at)
+		VALUES (?, 0, 0, ?)
+		ON CONFLICT(scope) DO NOTHING
+	`, scope, now); err != nil {
+		return 0, fmt.Errorf("seed websocket sequence state: %w", err)
+	}
+
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT next_outbound_seq
+		FROM ws_sequence_states
+		WHERE scope = ?
+	`, scope).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("load websocket next seq: %w", err)
+	}
+	seq++
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE ws_sequence_states
+		SET next_outbound_seq = ?, updated_at = ?
+		WHERE scope = ?
+	`, seq, now, scope); err != nil {
+		return 0, fmt.Errorf("update websocket next seq: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO ws_outbox (scope, seq, type, ref_id, payload, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(scope, seq) DO UPDATE SET
+			type = excluded.type,
+			ref_id = excluded.ref_id,
+			payload = excluded.payload,
+			created_at = excluded.created_at
+	`, scope, seq, msgType, refID, payload, now); err != nil {
+		return 0, fmt.Errorf("append websocket outbox message: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit websocket outbox append tx: %w", err)
+	}
+	return seq, nil
+}
+
 func (s *SQLite) ListWSOutbox(ctx context.Context, scope string, afterSeq int64, limit int) ([]models.WSOutboxMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT seq, type, ref_id, payload, created_at
@@ -182,6 +234,37 @@ func (s *SQLite) SetWSLastReceivedSeq(ctx context.Context, scope string, seq int
 	`, scope, seq, now)
 	if err != nil {
 		return fmt.Errorf("set websocket last received seq: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) ResetWSOutbox(ctx context.Context, scope string, nextOutboundSeq int64) error {
+	now := time.Now().Unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin websocket outbox reset tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM ws_outbox
+		WHERE scope = ?
+	`, scope); err != nil {
+		return fmt.Errorf("delete websocket outbox: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO ws_sequence_states (scope, next_outbound_seq, last_received_seq, updated_at)
+		VALUES (?, ?, 0, ?)
+		ON CONFLICT(scope) DO UPDATE SET
+			next_outbound_seq = excluded.next_outbound_seq,
+			updated_at = excluded.updated_at
+	`, scope, nextOutboundSeq, now); err != nil {
+		return fmt.Errorf("reset websocket sequence state: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit websocket outbox reset tx: %w", err)
 	}
 	return nil
 }

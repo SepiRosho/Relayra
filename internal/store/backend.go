@@ -61,10 +61,12 @@ type Backend interface {
 	DeleteSenderRequestStates(ctx context.Context, requestIDs []string) error
 	NextWSOutboundSeq(ctx context.Context, scope string) (int64, error)
 	EnqueueWSOutbox(ctx context.Context, scope string, seq int64, msgType, refID, payload string) error
+	AppendWSOutbox(ctx context.Context, scope string, msgType, refID, payload string) (int64, error)
 	ListWSOutbox(ctx context.Context, scope string, afterSeq int64, limit int) ([]models.WSOutboxMessage, error)
 	AckWSOutboxThrough(ctx context.Context, scope string, seq int64) ([]models.WSOutboxMessage, error)
 	GetWSSequenceState(ctx context.Context, scope string) (*models.WSSequenceState, error)
 	SetWSLastReceivedSeq(ctx context.Context, scope string, seq int64) error
+	ResetWSOutbox(ctx context.Context, scope string, nextOutboundSeq int64) error
 	StoreInboundChunk(ctx context.Context, chunk models.TransportChunk, ttl time.Duration) (*models.ChunkReceipt, *models.RelayRequest, error)
 	ListChunkReceipts(ctx context.Context) ([]models.ChunkReceipt, error)
 	DeleteChunkReceipt(ctx context.Context, transferID string) error

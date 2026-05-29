@@ -19,6 +19,31 @@ const (
 
 var ErrWSOutboxGap = errors.New("websocket outbox sequence gap")
 
+const appendWSOutboxScript = `
+local stateKey = KEYS[1]
+local indexKey = KEYS[2]
+local msgPrefix = KEYS[3]
+local scope = ARGV[1]
+local msgType = ARGV[2]
+local refID = ARGV[3]
+local payload = ARGV[4]
+local now = ARGV[5]
+
+local seq = redis.call('HINCRBY', stateKey, 'next_outbound_seq', 1)
+redis.call('HSET', stateKey, 'updated_at', now)
+local msgKey = msgPrefix .. seq
+redis.call('ZADD', indexKey, seq, tostring(seq))
+redis.call('HSET', msgKey,
+	'scope', scope,
+	'seq', seq,
+	'type', msgType,
+	'ref_id', refID,
+	'payload', payload,
+	'created_at', now
+)
+return seq
+`
+
 func (r *Redis) NextWSOutboundSeq(ctx context.Context, scope string) (int64, error) {
 	stateKey := keyWSStatePrefix + scope
 	nextSeq, err := r.Client.HIncrBy(ctx, stateKey, "next_outbound_seq", 1).Result()
@@ -46,6 +71,31 @@ func (r *Redis) EnqueueWSOutbox(ctx context.Context, scope string, seq int64, ms
 		return fmt.Errorf("enqueue websocket outbox message: %w", err)
 	}
 	return nil
+}
+
+func (r *Redis) AppendWSOutbox(ctx context.Context, scope string, msgType, refID, payload string) (int64, error) {
+	stateKey := keyWSStatePrefix + scope
+	indexKey := keyWSOutboxIndexPrefix + scope
+	msgPrefix := keyWSOutboxMsgPrefix + scope + ":"
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+
+	result, err := r.Client.Eval(ctx, appendWSOutboxScript, []string{stateKey, indexKey, msgPrefix}, scope, msgType, refID, payload, now).Result()
+	if err != nil {
+		return 0, fmt.Errorf("append websocket outbox message: %w", err)
+	}
+
+	switch seq := result.(type) {
+	case int64:
+		return seq, nil
+	case string:
+		parsed, parseErr := strconv.ParseInt(seq, 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parse websocket outbox seq %q: %w", seq, parseErr)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("unexpected websocket outbox seq type %T", result)
+	}
 }
 
 func (r *Redis) ListWSOutbox(ctx context.Context, scope string, afterSeq int64, limit int) ([]models.WSOutboxMessage, error) {
@@ -168,6 +218,29 @@ func (r *Redis) SetWSLastReceivedSeq(ctx context.Context, scope string, seq int6
 		"updated_at":        time.Now().Unix(),
 	}).Err(); err != nil {
 		return fmt.Errorf("set websocket last received seq: %w", err)
+	}
+	return nil
+}
+
+func (r *Redis) ResetWSOutbox(ctx context.Context, scope string, nextOutboundSeq int64) error {
+	indexKey := keyWSOutboxIndexPrefix + scope
+	members, err := r.Client.ZRange(ctx, indexKey, 0, -1).Result()
+	if err != nil {
+		return fmt.Errorf("list websocket outbox for reset: %w", err)
+	}
+
+	stateKey := keyWSStatePrefix + scope
+	pipe := r.Client.Pipeline()
+	for _, member := range members {
+		pipe.Del(ctx, fmt.Sprintf("%s%s:%s", keyWSOutboxMsgPrefix, scope, member))
+	}
+	pipe.Del(ctx, indexKey)
+	pipe.HSet(ctx, stateKey, map[string]interface{}{
+		"next_outbound_seq": nextOutboundSeq,
+		"updated_at":        time.Now().Unix(),
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("reset websocket outbox: %w", err)
 	}
 	return nil
 }

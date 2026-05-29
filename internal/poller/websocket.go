@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -392,6 +393,14 @@ func (s *senderWebSocketSession) flushOutbox() error {
 
 	entries, err := s.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
 	if err != nil {
+		if errors.Is(err, store.ErrWSOutboxGap) {
+			if repairErr := rebuildSenderWSOutbox(context.Background(), s.cfg, s.rdb, s.listenerInfo.ID, s.lastSentSeq); repairErr != nil {
+				return fmt.Errorf("repair sender websocket outbox: %w", repairErr)
+			}
+			entries, err = s.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
+		}
+	}
+	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
@@ -404,6 +413,60 @@ func (s *senderWebSocketSession) flushOutbox() error {
 		}
 		s.lastSentSeq = entry.Seq
 	}
+	return nil
+}
+
+func rebuildSenderWSOutbox(ctx context.Context, cfg *config.Config, rdb store.Backend, listenerID string, afterSeq int64) error {
+	scope := models.SenderWSScope(listenerID)
+	if err := rdb.ResetWSOutbox(ctx, scope, afterSeq); err != nil {
+		return err
+	}
+
+	results, err := rdb.LeaseResults(ctx, cfg.PollBatchSize, senderResultLeaseDuration(cfg))
+	if err != nil {
+		return err
+	}
+	for i := range results {
+		result := results[i]
+		if _, err := transport.EnqueueWSMessage(ctx, rdb, scope, &models.WSMessage{
+			Type:   models.WSMessageTypeResult,
+			PeerID: listenerID,
+			Result: &result,
+		}, result.RequestID); err != nil {
+			return err
+		}
+	}
+
+	requestStates, err := rdb.ListSenderRequestStates(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range requestStates {
+		state := requestStates[i]
+		if _, err := transport.EnqueueWSMessage(ctx, rdb, scope, &models.WSMessage{
+			Type:         models.WSMessageTypeRequestState,
+			PeerID:       listenerID,
+			RequestState: &state,
+		}, state.RequestID); err != nil {
+			return err
+		}
+	}
+
+	chunkReceipts, err := rdb.ListChunkReceipts(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range chunkReceipts {
+		receipt := chunkReceipts[i]
+		if _, err := transport.EnqueueWSMessage(ctx, rdb, scope, &models.WSMessage{
+			Type:         models.WSMessageTypeChunkReceipt,
+			PeerID:       listenerID,
+			ChunkReceipt: &receipt,
+		}, receipt.TransferID); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

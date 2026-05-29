@@ -119,10 +119,18 @@ relayra service start
 relayra service status
 ```
 
+Upgrade an existing node in-place without re-running setup:
+
+```bash
+sudo ./upgrade.sh
+```
+
 ## Upgrade Note
 
 This release changes the sender/listener delivery state model.
 Upgrade during a drained maintenance window: let queued work finish before deploying the new version.
+
+The release bundle now also includes `upgrade.sh`, which preserves `/opt/relayra/.env`, backs up `/opt/relayra/relayra.db` when present, swaps the binary in place, and restarts the systemd service if it was already running.
 
 ## API Example
 
