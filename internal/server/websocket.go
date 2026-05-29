@@ -235,29 +235,40 @@ func (s *wsServerSession) flushOutbox() error {
 	s.outboxMu.Lock()
 	defer s.outboxMu.Unlock()
 
-	entries, err := s.handlers.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
-	if err != nil {
-		if errors.Is(err, store.ErrWSOutboxGap) {
-			if repairErr := s.handlers.rebuildListenerWSOutbox(context.Background(), s.peerID, s.lastSentSeq); repairErr != nil {
-				return fmt.Errorf("repair listener websocket outbox: %w", repairErr)
-			}
-			entries, err = s.handlers.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
-		}
-	}
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		msg, err := transport.DecodeWSOutboxMessage(entry)
+	for {
+		state, err := s.handlers.rdb.GetWSSequenceState(context.Background(), s.scope)
 		if err != nil {
 			return err
 		}
-		if err := s.writeJSON(*msg); err != nil {
+		if state == nil || state.NextOutboundSeq <= s.lastSentSeq {
+			return nil
+		}
+
+		entries, err := s.handlers.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
+		if err != nil {
+			if errors.Is(err, store.ErrWSOutboxGap) {
+				if repairErr := s.handlers.rebuildListenerWSOutbox(context.Background(), s.peerID, s.lastSentSeq); repairErr != nil {
+					return fmt.Errorf("repair listener websocket outbox: %w", repairErr)
+				}
+				continue
+			}
 			return err
 		}
-		s.lastSentSeq = entry.Seq
+		if len(entries) == 0 {
+			return nil
+		}
+
+		for _, entry := range entries {
+			msg, err := transport.DecodeWSOutboxMessage(entry)
+			if err != nil {
+				return err
+			}
+			if err := s.writeJSON(*msg); err != nil {
+				return err
+			}
+			s.lastSentSeq = entry.Seq
+		}
 	}
-	return nil
 }
 
 func (s *wsServerSession) writeJSON(msg models.WSMessage) error {
