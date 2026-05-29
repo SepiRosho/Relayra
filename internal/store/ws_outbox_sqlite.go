@@ -79,6 +79,7 @@ func (s *SQLite) ListWSOutbox(ctx context.Context, scope string, afterSeq int64,
 	defer rows.Close()
 
 	messages := make([]models.WSOutboxMessage, 0, limit)
+	expectedSeq := afterSeq + 1
 	for rows.Next() {
 		var msg models.WSOutboxMessage
 		var createdAt int64
@@ -86,10 +87,14 @@ func (s *SQLite) ListWSOutbox(ctx context.Context, scope string, afterSeq int64,
 		if err := rows.Scan(&msg.Seq, &msg.Type, &refID, &msg.Payload, &createdAt); err != nil {
 			return nil, err
 		}
+		if msg.Seq != expectedSeq {
+			return nil, fmt.Errorf("%w: scope %s expected seq %d but found %d", ErrWSOutboxGap, scope, expectedSeq, msg.Seq)
+		}
 		msg.Scope = scope
 		msg.RefID = refID.String
 		msg.CreatedAt = time.Unix(createdAt, 0)
 		messages = append(messages, msg)
+		expectedSeq++
 	}
 	return messages, rows.Err()
 }

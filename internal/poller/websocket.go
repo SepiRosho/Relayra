@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -45,6 +46,7 @@ type senderWebSocketSession struct {
 	notifyCh        chan struct{}
 	doneCh          chan struct{}
 	errCh           chan sessionErr
+	outboxMu        sync.Mutex
 	lastSentSeq     int64
 	lastReceivedSeq int64
 }
@@ -260,7 +262,10 @@ func runWebSocketSession(ctx context.Context, cfg *config.Config, rdb store.Back
 		_ = conn.SetReadDeadline(time.Now().Add(cfg.WSIdleTimeoutDuration()))
 
 		if msg.Type == models.WSMessageTypeAck {
-			if ackErr := handleSenderOutboxAck(ctx, rdb, scope, msg.Ack); ackErr != nil {
+			session.outboxMu.Lock()
+			ackErr := handleSenderOutboxAck(ctx, rdb, scope, msg.Ack)
+			session.outboxMu.Unlock()
+			if ackErr != nil {
 				result.err = ackErr
 				result.failureKind = webSocketFailureInternal
 				return result
@@ -382,6 +387,9 @@ func (s *senderWebSocketSession) writerLoop() {
 }
 
 func (s *senderWebSocketSession) flushOutbox() error {
+	s.outboxMu.Lock()
+	defer s.outboxMu.Unlock()
+
 	entries, err := s.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
 	if err != nil {
 		return err

@@ -32,6 +32,7 @@ type wsServerSession struct {
 	notifyCh            chan struct{}
 	doneCh              chan struct{}
 	closeOnce           sync.Once
+	outboxMu            sync.Mutex
 	lastSentSeq         int64
 	lastReceivedSeq     int64
 	lastPeerSeenRefresh time.Time
@@ -229,6 +230,9 @@ func (s *wsServerSession) writerLoop() {
 }
 
 func (s *wsServerSession) flushOutbox() error {
+	s.outboxMu.Lock()
+	defer s.outboxMu.Unlock()
+
 	entries, err := s.handlers.rdb.ListWSOutbox(context.Background(), s.scope, s.lastSentSeq, 64)
 	if err != nil {
 		return err
@@ -272,7 +276,10 @@ func (s *wsServerSession) readLoop() {
 		}
 
 		if msg.Type == models.WSMessageTypeAck {
-			if _, err := s.handlers.rdb.AckWSOutboxThrough(baseCtx, s.scope, msg.Ack); err != nil {
+			s.outboxMu.Lock()
+			_, err := s.handlers.rdb.AckWSOutboxThrough(baseCtx, s.scope, msg.Ack)
+			s.outboxMu.Unlock()
+			if err != nil {
 				slog.WarnContext(baseCtx, "failed to ack websocket outbox", "error", err, "ack", msg.Ack)
 				s.shutdown(websocket.CloseInternalServerErr, "ack handling failed")
 				return

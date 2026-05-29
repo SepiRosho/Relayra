@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -15,6 +16,8 @@ const (
 	keyWSOutboxIndexPrefix = "relayra:ws_outbox_index:"
 	keyWSOutboxMsgPrefix   = "relayra:ws_outbox_msg:"
 )
+
+var ErrWSOutboxGap = errors.New("websocket outbox sequence gap")
 
 func (r *Redis) NextWSOutboundSeq(ctx context.Context, scope string) (int64, error) {
 	stateKey := keyWSStatePrefix + scope
@@ -58,14 +61,18 @@ func (r *Redis) ListWSOutbox(ctx context.Context, scope string, afterSeq int64, 
 	}
 
 	out := make([]models.WSOutboxMessage, 0, len(members))
+	expectedSeq := afterSeq + 1
 	for _, member := range members {
 		seq, err := strconv.ParseInt(member, 10, 64)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("%w: invalid websocket outbox seq %q for scope %s", ErrWSOutboxGap, member, scope)
+		}
+		if seq != expectedSeq {
+			return nil, fmt.Errorf("%w: scope %s expected seq %d but found %d", ErrWSOutboxGap, scope, expectedSeq, seq)
 		}
 		data, err := r.Client.HGetAll(ctx, fmt.Sprintf("%s%s:%d", keyWSOutboxMsgPrefix, scope, seq)).Result()
 		if err == redis.Nil || len(data) == 0 {
-			continue
+			return nil, fmt.Errorf("%w: scope %s missing payload for seq %d", ErrWSOutboxGap, scope, seq)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("get websocket outbox message %d: %w", seq, err)
@@ -79,6 +86,7 @@ func (r *Redis) ListWSOutbox(ctx context.Context, scope string, afterSeq int64, 
 			Payload:   data["payload"],
 			CreatedAt: time.Unix(createdAt, 0),
 		})
+		expectedSeq++
 	}
 	return out, nil
 }
