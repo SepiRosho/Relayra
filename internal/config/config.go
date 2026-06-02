@@ -104,7 +104,7 @@ func DefaultConfig() *Config {
 		AsyncWorkers:             4,
 		TransportMode:            TransportModeLongPoll,
 		ProxyCooldownSeconds:     300,
-		TransportChunkSizeBytes:  262144,
+		TransportChunkSizeBytes:  65536,
 		WSPingInterval:           20,
 		WSKeepaliveInterval:      5,
 		WSWriteTimeout:           15,

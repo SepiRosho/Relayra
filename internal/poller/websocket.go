@@ -483,10 +483,9 @@ func (s *senderWebSocketSession) writeJSON(msg models.WSMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal websocket message: %w", err)
 	}
-	// Scale the write deadline by payload size so large results (e.g. multi-MB
-	// response bodies) don't time out mid-write. Assume at least 256 KB/s
-	// sustained throughput as a conservative floor.
-	const minThroughputBPS = 256 * 1024
+	// Scale the write deadline by payload size. 32 KB/s is a conservative floor
+	// that handles sustained congestion/loss on the slow sender→listener path.
+	const minThroughputBPS = 32 * 1024
 	extra := time.Duration(len(data)/minThroughputBPS) * time.Second
 	_ = s.conn.SetWriteDeadline(time.Now().Add(s.cfg.WSWriteTimeoutDuration() + extra))
 	return s.conn.WriteMessage(websocket.TextMessage, data)
