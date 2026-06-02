@@ -9,6 +9,7 @@ import (
 
 const (
 	TransportChunkKindRequest = "request"
+	TransportChunkKindResult  = "result"
 )
 
 // TransportChunk carries part of a larger transport payload.
@@ -54,6 +55,11 @@ type ChunkCursor struct {
 // RequestTransferID returns the transport transfer identifier for a request payload.
 func RequestTransferID(requestID string) string {
 	return fmt.Sprintf("%s:%s", requestID, TransportChunkKindRequest)
+}
+
+// ResultTransferID returns the transport transfer identifier for a result payload.
+func ResultTransferID(requestID string) string {
+	return fmt.Sprintf("%s:%s", requestID, TransportChunkKindResult)
 }
 
 // SHA256Hex returns the SHA-256 checksum for the provided payload.

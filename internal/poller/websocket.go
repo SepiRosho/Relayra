@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -439,11 +440,7 @@ func rebuildSenderWSOutbox(ctx context.Context, cfg *config.Config, rdb store.Ba
 	}
 	for i := range results {
 		result := results[i]
-		if _, err := transport.EnqueueWSMessage(ctx, rdb, scope, &models.WSMessage{
-			Type:   models.WSMessageTypeResult,
-			PeerID: listenerID,
-			Result: &result,
-		}, result.RequestID); err != nil {
+		if err := queueSenderResultWS(ctx, rdb, listenerID, &result, cfg.TransportChunkSize()); err != nil {
 			return err
 		}
 	}
@@ -482,8 +479,17 @@ func rebuildSenderWSOutbox(ctx context.Context, cfg *config.Config, rdb store.Ba
 }
 
 func (s *senderWebSocketSession) writeJSON(msg models.WSMessage) error {
-	_ = s.conn.SetWriteDeadline(time.Now().Add(s.cfg.WSWriteTimeoutDuration()))
-	return s.conn.WriteJSON(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal websocket message: %w", err)
+	}
+	// Scale the write deadline by payload size so large results (e.g. multi-MB
+	// response bodies) don't time out mid-write. Assume at least 256 KB/s
+	// sustained throughput as a conservative floor.
+	const minThroughputBPS = 256 * 1024
+	extra := time.Duration(len(data)/minThroughputBPS) * time.Second
+	_ = s.conn.SetWriteDeadline(time.Now().Add(s.cfg.WSWriteTimeoutDuration() + extra))
+	return s.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (s *senderWebSocketSession) handleInbound(ctx context.Context, msg *models.WSMessage, cycle *int64) error {
@@ -532,7 +538,7 @@ func handleSenderOutboxAck(ctx context.Context, rdb store.Backend, scope string,
 	resultIDs := make([]string, 0)
 	for _, entry := range acked {
 		switch entry.Type {
-		case models.WSMessageTypeResult:
+		case models.WSMessageTypeResult, models.WSMessageTypeResultChunk:
 			if entry.RefID != "" {
 				resultIDs = append(resultIDs, entry.RefID)
 			}

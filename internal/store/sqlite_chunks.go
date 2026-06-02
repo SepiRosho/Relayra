@@ -125,6 +125,107 @@ func (s *SQLite) StoreInboundChunk(ctx context.Context, chunk models.TransportCh
 	return &receipt, &req, nil
 }
 
+func (s *SQLite) StoreInboundResultChunk(ctx context.Context, chunk models.TransportChunk, ttl time.Duration) (*models.RelayResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin inbound result chunk tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var nextIndex, total, totalSize int
+	var checksum, data string
+	err = tx.QueryRowContext(ctx, `
+		SELECT next_index, total, checksum, total_size, data
+		FROM inbound_chunks
+		WHERE transfer_id = ? AND expires_at > ?
+	`, chunk.TransferID, time.Now().Unix()).Scan(&nextIndex, &total, &checksum, &totalSize, &data)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("load inbound result chunk state: %w", err)
+	}
+
+	if err == nil {
+		if checksum != chunk.Checksum {
+			tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID)
+			tx.Commit()
+			return nil, fmt.Errorf("result chunk checksum changed for transfer %s", chunk.TransferID)
+		}
+		if total != chunk.Total {
+			tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID)
+			tx.Commit()
+			return nil, fmt.Errorf("result chunk total changed for transfer %s", chunk.TransferID)
+		}
+	}
+
+	if chunk.Index < nextIndex {
+		return nil, nil
+	}
+	if chunk.Index > nextIndex {
+		tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID)
+		tx.Commit()
+		return nil, fmt.Errorf("out-of-order result chunk index %d expected %d", chunk.Index, nextIndex)
+	}
+
+	payloadBytes, err := base64.StdEncoding.DecodeString(chunk.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid result chunk payload: %w", err)
+	}
+
+	data += string(payloadBytes)
+	nextIndex++
+	expiresAt := time.Now().Add(ttl).Unix()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO inbound_chunks (transfer_id, request_id, kind, next_index, total, checksum, total_size, data, expires_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(transfer_id) DO UPDATE SET
+			request_id = excluded.request_id,
+			kind = excluded.kind,
+			next_index = excluded.next_index,
+			total = excluded.total,
+			checksum = excluded.checksum,
+			total_size = excluded.total_size,
+			data = excluded.data,
+			expires_at = excluded.expires_at,
+			updated_at = excluded.updated_at
+	`, chunk.TransferID, chunk.RequestID, chunk.Kind, nextIndex, chunk.Total, chunk.Checksum, chunk.TotalSize, data, expiresAt, time.Now().Unix()); err != nil {
+		return nil, fmt.Errorf("upsert inbound result chunk state: %w", err)
+	}
+
+	if nextIndex < chunk.Total {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit inbound result chunk tx: %w", err)
+		}
+		return nil, nil
+	}
+
+	if len(data) != chunk.TotalSize {
+		tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID)
+		tx.Commit()
+		return nil, fmt.Errorf("result chunk reassembly size mismatch")
+	}
+	if models.SHA256Hex([]byte(data)) != chunk.Checksum {
+		tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID)
+		tx.Commit()
+		return nil, fmt.Errorf("result chunk reassembly checksum mismatch for transfer %s", chunk.TransferID)
+	}
+
+	var result models.RelayResult
+	if err := json.Unmarshal([]byte(data), &result); err != nil {
+		tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID)
+		tx.Commit()
+		return nil, fmt.Errorf("invalid reassembled result payload: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM inbound_chunks WHERE transfer_id = ?`, chunk.TransferID); err != nil {
+		return nil, fmt.Errorf("delete completed inbound result chunk state: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit completed inbound result chunk tx: %w", err)
+	}
+
+	return &result, nil
+}
+
 func (s *SQLite) ListChunkReceipts(ctx context.Context) ([]models.ChunkReceipt, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT transfer_id, request_id, next_index, completed, reset, error

@@ -104,7 +104,7 @@ func (d *dispatcher) execute(ctx context.Context, req *models.RelayRequest) {
 		slog.ErrorContext(ctx, "failed to store result locally", "error", err)
 		return
 	}
-	if err := queueSenderResultWS(ctx, d.rdb, d.listenerID, result); err != nil {
+	if err := queueSenderResultWS(ctx, d.rdb, d.listenerID, result, d.cfg.TransportChunkSize()); err != nil {
 		slog.ErrorContext(ctx, "failed to queue websocket result", "error", err)
 	} else {
 		d.NotifyOutbox()

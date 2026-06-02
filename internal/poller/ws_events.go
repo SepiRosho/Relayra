@@ -17,16 +17,50 @@ func queueSenderRequestStateWS(ctx context.Context, rdb store.Backend, listenerI
 	return err
 }
 
-func queueSenderResultWS(ctx context.Context, rdb store.Backend, listenerID string, result *models.RelayResult) error {
+func queueSenderResultWS(ctx context.Context, rdb store.Backend, listenerID string, result *models.RelayResult, chunkSize int) error {
 	if result == nil {
 		return nil
 	}
-	_, err := transport.EnqueueWSMessage(ctx, rdb, models.SenderWSScope(listenerID), &models.WSMessage{
-		Type:   models.WSMessageTypeResult,
-		PeerID: listenerID,
-		Result: result,
-	}, result.RequestID)
-	return err
+	scope := models.SenderWSScope(listenerID)
+
+	needsChunking, _, err := transport.ResultNeedsChunking(*result, chunkSize)
+	if err != nil {
+		return err
+	}
+
+	if !needsChunking {
+		_, err := transport.EnqueueWSMessage(ctx, rdb, scope, &models.WSMessage{
+			Type:   models.WSMessageTypeResult,
+			PeerID: listenerID,
+			Result: result,
+		}, result.RequestID)
+		return err
+	}
+
+	data, err := transport.ResultPayload(*result)
+	if err != nil {
+		return err
+	}
+	total := (len(data) + chunkSize - 1) / chunkSize
+	for i := 0; i < total; i++ {
+		chunk, err := transport.ResultChunkAt(*result, chunkSize, i)
+		if err != nil {
+			return err
+		}
+		// Only the last chunk carries refID so AckResults fires exactly once.
+		refID := ""
+		if i == total-1 {
+			refID = result.RequestID
+		}
+		if _, err := transport.EnqueueWSMessage(ctx, rdb, scope, &models.WSMessage{
+			Type:        models.WSMessageTypeResultChunk,
+			PeerID:      listenerID,
+			ResultChunk: chunk,
+		}, refID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func queueSenderChunkReceiptWS(ctx context.Context, rdb store.Backend, listenerID string, receipt models.ChunkReceipt) error {

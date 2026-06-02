@@ -120,6 +120,90 @@ func (r *Redis) StoreInboundChunk(ctx context.Context, chunk models.TransportChu
 	return &receipt, &req, nil
 }
 
+func (r *Redis) StoreInboundResultChunk(ctx context.Context, chunk models.TransportChunk, ttl time.Duration) (*models.RelayResult, error) {
+	stateKey := keyInboundChunkPrefix + chunk.TransferID
+	state, err := r.Client.HGetAll(ctx, stateKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("load inbound result chunk state: %w", err)
+	}
+
+	nextIndex := 0
+	assembledData := ""
+	if len(state) > 0 {
+		nextIndex, _ = strconv.Atoi(state["next_index"])
+		assembledData = state["data"]
+		if state["checksum"] != "" && state["checksum"] != chunk.Checksum {
+			r.Client.Del(ctx, stateKey)
+			return nil, fmt.Errorf("result chunk checksum changed for transfer %s", chunk.TransferID)
+		}
+		if state["total"] != "" {
+			total, _ := strconv.Atoi(state["total"])
+			if total != chunk.Total {
+				r.Client.Del(ctx, stateKey)
+				return nil, fmt.Errorf("result chunk total changed for transfer %s", chunk.TransferID)
+			}
+		}
+	}
+
+	if chunk.Index < nextIndex {
+		return nil, nil
+	}
+	if chunk.Index > nextIndex {
+		r.Client.Del(ctx, stateKey)
+		return nil, fmt.Errorf("out-of-order result chunk index %d expected %d", chunk.Index, nextIndex)
+	}
+
+	payloadBytes, err := base64.StdEncoding.DecodeString(chunk.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid result chunk payload: %w", err)
+	}
+
+	assembledData += string(payloadBytes)
+	nextIndex++
+
+	pipe := r.Client.Pipeline()
+	pipe.HSet(ctx, stateKey, map[string]interface{}{
+		"request_id": chunk.RequestID,
+		"kind":       chunk.Kind,
+		"next_index": nextIndex,
+		"total":      chunk.Total,
+		"checksum":   chunk.Checksum,
+		"total_size": chunk.TotalSize,
+		"data":       assembledData,
+		"updated_at": time.Now().Unix(),
+	})
+	pipe.Expire(ctx, stateKey, ttl)
+
+	if nextIndex < chunk.Total {
+		if _, err := pipe.Exec(ctx); err != nil {
+			return nil, fmt.Errorf("store inbound result chunk: %w", err)
+		}
+		return nil, nil
+	}
+
+	if len(assembledData) != chunk.TotalSize {
+		r.Client.Del(ctx, stateKey)
+		return nil, fmt.Errorf("result chunk reassembly size mismatch: got %d want %d", len(assembledData), chunk.TotalSize)
+	}
+	if models.SHA256Hex([]byte(assembledData)) != chunk.Checksum {
+		r.Client.Del(ctx, stateKey)
+		return nil, fmt.Errorf("result chunk reassembly checksum mismatch for transfer %s", chunk.TransferID)
+	}
+
+	var result models.RelayResult
+	if err := json.Unmarshal([]byte(assembledData), &result); err != nil {
+		r.Client.Del(ctx, stateKey)
+		return nil, fmt.Errorf("invalid reassembled result payload: %w", err)
+	}
+
+	pipe.Del(ctx, stateKey)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("finalize inbound result chunk: %w", err)
+	}
+
+	return &result, nil
+}
+
 func (r *Redis) ListChunkReceipts(ctx context.Context) ([]models.ChunkReceipt, error) {
 	ids, err := r.Client.SMembers(ctx, keyChunkReceiptSet).Result()
 	if err != nil {

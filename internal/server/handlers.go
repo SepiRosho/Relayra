@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -421,6 +422,67 @@ func (h *Handlers) storeSenderResultWS(ctx context.Context, peerID string, resul
 		go webhook.Deliver(webhookCtx, h.rdb, webhookURL, result.RequestID, &resultCopy, h.cfg.WebhookMaxRetries)
 	}
 	return nil
+}
+
+func (h *Handlers) applySenderResultChunkWS(ctx context.Context, peerID string, chunk *models.TransportChunk) error {
+	if chunk == nil {
+		return nil
+	}
+	ttl := time.Duration(h.cfg.ResultTTL) * time.Second
+	result, err := h.rdb.StoreInboundResultChunk(ctx, *chunk, ttl)
+	if err != nil {
+		slog.WarnContext(ctx, "result chunk assembly error, discarding transfer",
+			"transfer_id", chunk.TransferID,
+			"request_id", chunk.RequestID,
+			"error", err,
+		)
+		return nil
+	}
+	if result == nil {
+		return nil
+	}
+	return h.storeSenderResultWS(ctx, peerID, result)
+}
+
+func (h *Handlers) SpeedTestDownload(w http.ResponseWriter, r *http.Request) {
+	sizeStr := r.URL.Query().Get("size")
+	size, _ := strconv.Atoi(sizeStr)
+	if size < 1 {
+		size = 5 * 1024 * 1024
+	}
+	const maxSize = 100 * 1024 * 1024
+	if size > maxSize {
+		size = maxSize
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(size))
+	w.WriteHeader(http.StatusOK)
+
+	buf := make([]byte, 64*1024)
+	remaining := size
+	for remaining > 0 {
+		n := len(buf)
+		if n > remaining {
+			n = remaining
+		}
+		if _, err := w.Write(buf[:n]); err != nil {
+			return
+		}
+		remaining -= n
+	}
+}
+
+func (h *Handlers) SpeedTestUpload(w http.ResponseWriter, r *http.Request) {
+	const maxSize = 100 * 1024 * 1024
+	n, err := io.Copy(io.Discard, io.LimitReader(r.Body, maxSize))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"bytes_received": n,
+	})
 }
 
 func (h *Handlers) applySenderChunkReceiptWS(ctx context.Context, peerID string, receipt *models.ChunkReceipt) error {

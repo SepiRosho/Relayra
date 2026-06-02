@@ -69,6 +69,7 @@ type Backend interface {
 	SetWSLastReceivedSeq(ctx context.Context, scope string, seq int64) error
 	ResetWSOutbox(ctx context.Context, scope string, nextOutboundSeq int64) error
 	StoreInboundChunk(ctx context.Context, chunk models.TransportChunk, ttl time.Duration) (*models.ChunkReceipt, *models.RelayRequest, error)
+	StoreInboundResultChunk(ctx context.Context, chunk models.TransportChunk, ttl time.Duration) (*models.RelayResult, error)
 	ListChunkReceipts(ctx context.Context) ([]models.ChunkReceipt, error)
 	DeleteChunkReceipt(ctx context.Context, transferID string) error
 	ApplyChunkReceipt(ctx context.Context, receipt models.ChunkReceipt) error

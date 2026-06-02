@@ -10,6 +10,7 @@ const (
 	WSMessageTypePushChunk    = "push_chunk"
 	WSMessageTypeRequestState = "request_state"
 	WSMessageTypeResult       = "result"
+	WSMessageTypeResultChunk  = "result_chunk"
 	WSMessageTypeChunkReceipt = "chunk_receipt"
 	WSMessageTypeKeepalive    = "keepalive"
 	WSMessageTypeError        = "error"
@@ -27,6 +28,7 @@ type WSMessage struct {
 	Chunk           *TransportChunk   `json:"chunk,omitempty"`
 	RequestState    *RequestSyncState `json:"request_state,omitempty"`
 	Result          *RelayResult      `json:"result,omitempty"`
+	ResultChunk     *TransportChunk   `json:"result_chunk,omitempty"`
 	ChunkReceipt    *ChunkReceipt     `json:"chunk_receipt,omitempty"`
 	Probe           *ProbeMessage     `json:"probe,omitempty"`
 	Error           string            `json:"error,omitempty"`

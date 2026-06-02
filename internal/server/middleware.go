@@ -99,7 +99,8 @@ func apiTokenAuthMiddleware(rdb store.Backend) func(http.Handler) http.Handler {
 			path := r.URL.Path
 
 			// Skip auth for non-protected endpoints
-			if path == "/health" || path == "/api/v1/poll" || path == "/api/v1/pair" || path == "/api/v1/ws" {
+			if path == "/health" || path == "/api/v1/poll" || path == "/api/v1/pair" || path == "/api/v1/ws" ||
+				strings.HasPrefix(path, "/api/v1/speedtest/") {
 				next.ServeHTTP(w, r)
 				return
 			}

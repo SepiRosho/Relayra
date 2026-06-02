@@ -1,39 +1,57 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/relayra/relayra/internal/config"
 	"github.com/relayra/relayra/internal/models"
+	"github.com/relayra/relayra/internal/proxy"
 	"github.com/relayra/relayra/internal/store"
 )
 
 // PeerDetailView shows details of a single peer with management options.
 type PeerDetailView struct {
-	cfg           *config.Config
-	rdb           store.Backend
-	peer          *models.Peer
-	peerID        string
-	isListener    bool
-	err           error
-	ready         bool
-	actionIdx     int
-	actions       []string
-	confirm       bool
-	confirmAction string
-	deleted       bool
-	queueSize     int64
-	statusMsg     string
+	cfg              *config.Config
+	rdb              store.Backend
+	peer             *models.Peer
+	peerID           string
+	isListener       bool
+	err              error
+	ready            bool
+	actionIdx        int
+	actions          []string
+	confirm          bool
+	confirmAction    string
+	deleted          bool
+	queueSize        int64
+	statusMsg        string
+	speedTestRunning bool
+	speedTestResult  *speedTestResult
+}
+
+type speedTestResult struct {
+	downloadMBps float64
+	uploadMBps   float64
+	proxyURL     string
+	testBytes    int
+	err          error
 }
 
 type peerDetailMsg struct {
 	peer      *models.Peer
 	queueSize int64
 	err       error
+}
+
+type speedTestMsg struct {
+	result *speedTestResult
 }
 
 type peerDeletedMsg struct {
@@ -50,6 +68,9 @@ func NewPeerDetailView(cfg *config.Config, rdb store.Backend, peerID string, isL
 	actions := []string{"Refresh"}
 	if cfg.Role == config.RoleListener && !isListener {
 		actions = []string{"Refresh", "Clear Queue", "Delete Peer"}
+	}
+	if cfg.Role == config.RoleSender && isListener {
+		actions = []string{"Refresh", "Speed Test"}
 	}
 
 	return &PeerDetailView{
@@ -120,6 +141,11 @@ func (pd *PeerDetailView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return pd, nil
 
+	case speedTestMsg:
+		pd.speedTestRunning = false
+		pd.speedTestResult = msg.result
+		return pd, nil
+
 	case peerQueueClearedMsg:
 		if msg.err != nil {
 			pd.err = msg.err
@@ -181,8 +207,71 @@ func (pd *PeerDetailView) executeAction() (tea.Model, tea.Cmd) {
 	case "Delete Peer":
 		pd.confirm = true
 		pd.confirmAction = "delete"
+	case "Speed Test":
+		pd.speedTestRunning = true
+		pd.speedTestResult = nil
+		return pd, pd.runSpeedTest
 	}
 	return pd, nil
+}
+
+func (pd *PeerDetailView) runSpeedTest() tea.Msg {
+	const testBytes = 5 * 1024 * 1024 // 5 MB
+
+	ctx := context.Background()
+	proxyMgr := proxy.NewManager(pd.rdb, pd.cfg.ProxyCooldown(), pd.cfg.AllowDirectConnection)
+	tr, proxyURL, err := proxyMgr.GetTransport(ctx)
+	if err != nil {
+		return speedTestMsg{result: &speedTestResult{err: fmt.Errorf("no transport available: %w", err)}}
+	}
+
+	if pd.peer == nil {
+		return speedTestMsg{result: &speedTestResult{err: fmt.Errorf("peer not loaded")}}
+	}
+
+	client := &http.Client{Transport: tr, Timeout: 120 * time.Second}
+	base := "http://" + pd.peer.Address
+
+	// Download test
+	dlURL := fmt.Sprintf("%s/api/v1/speedtest/download?size=%d", base, testBytes)
+	dlStart := time.Now()
+	resp, err := client.Get(dlURL)
+	if err != nil {
+		return speedTestMsg{result: &speedTestResult{proxyURL: proxyURL, err: fmt.Errorf("download failed: %w", err)}}
+	}
+	dlBytes, err := io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("download failed: HTTP %d", resp.StatusCode)
+		if err != nil {
+			msg = fmt.Sprintf("download failed: %v", err)
+		}
+		return speedTestMsg{result: &speedTestResult{proxyURL: proxyURL, err: fmt.Errorf("%s", msg)}}
+	}
+	dlDuration := time.Since(dlStart)
+	downloadMBps := float64(dlBytes) / dlDuration.Seconds() / (1024 * 1024)
+
+	// Upload test
+	ulStart := time.Now()
+	body := bytes.NewReader(make([]byte, testBytes))
+	resp, err = client.Post(base+"/api/v1/speedtest/upload", "application/octet-stream", body)
+	if err != nil {
+		return speedTestMsg{result: &speedTestResult{
+			downloadMBps: downloadMBps, proxyURL: proxyURL, testBytes: testBytes,
+			err: fmt.Errorf("upload failed: %w", err),
+		}}
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	ulDuration := time.Since(ulStart)
+	uploadMBps := float64(testBytes) / ulDuration.Seconds() / (1024 * 1024)
+
+	return speedTestMsg{result: &speedTestResult{
+		downloadMBps: downloadMBps,
+		uploadMBps:   uploadMBps,
+		proxyURL:     proxyURL,
+		testBytes:    testBytes,
+	}}
 }
 
 func (pd *PeerDetailView) View() string {
@@ -262,12 +351,35 @@ func (pd *PeerDetailView) View() string {
 	for i, action := range pd.actions {
 		cursor := "  "
 		style := normalStyle
+		label := action
 		if i == pd.actionIdx {
 			cursor = "> "
 			style = selectedStyle
 		}
-		b.WriteString(style.Render(cursor + action))
+		if action == "Speed Test" && pd.speedTestRunning {
+			label = "Speed Test  (running...)"
+		}
+		b.WriteString(style.Render(cursor + label))
 		b.WriteString("\n")
+	}
+
+	if pd.speedTestResult != nil {
+		b.WriteString("\n")
+		r := pd.speedTestResult
+		via := r.proxyURL
+		if via == "" || via == "direct" {
+			via = "direct (no proxy)"
+		}
+		b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Via:"), valueStyle.Render(via)))
+		if r.err != nil {
+			b.WriteString(fmt.Sprintf("  %s\n", errorStyle.Render("  Error: "+r.err.Error())))
+		} else {
+			mb := float64(r.testBytes) / (1024 * 1024)
+			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Download:"),
+				successStyle.Render(fmt.Sprintf("%.2f MB/s  (%.0f MB)", r.downloadMBps, mb))))
+			b.WriteString(fmt.Sprintf("  %s %s\n", labelStyle.Render("Upload:"),
+				successStyle.Render(fmt.Sprintf("%.2f MB/s  (%.0f MB)", r.uploadMBps, mb))))
+		}
 	}
 
 	if pd.confirm {

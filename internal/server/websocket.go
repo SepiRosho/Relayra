@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -272,8 +273,14 @@ func (s *wsServerSession) flushOutbox() error {
 }
 
 func (s *wsServerSession) writeJSON(msg models.WSMessage) error {
-	_ = s.conn.SetWriteDeadline(time.Now().Add(s.handlers.cfg.WSWriteTimeoutDuration()))
-	return s.conn.WriteJSON(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal websocket message: %w", err)
+	}
+	const minThroughputBPS = 256 * 1024
+	extra := time.Duration(len(data)/minThroughputBPS) * time.Second
+	_ = s.conn.SetWriteDeadline(time.Now().Add(s.handlers.cfg.WSWriteTimeoutDuration() + extra))
+	return s.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (s *wsServerSession) readLoop() {
@@ -365,6 +372,11 @@ func (s *wsServerSession) handleInbound(ctx context.Context, msg *models.WSMessa
 			return fmt.Errorf("result payload missing")
 		}
 		return s.handlers.storeSenderResultWS(ctx, s.peerID, msg.Result)
+	case models.WSMessageTypeResultChunk:
+		if msg.ResultChunk == nil {
+			return fmt.Errorf("result_chunk payload missing")
+		}
+		return s.handlers.applySenderResultChunkWS(ctx, s.peerID, msg.ResultChunk)
 	case models.WSMessageTypeChunkReceipt:
 		if msg.ChunkReceipt == nil {
 			return fmt.Errorf("chunk_receipt payload missing")

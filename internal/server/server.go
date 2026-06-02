@@ -38,6 +38,8 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 	mux.HandleFunc("GET /api/v1/ws", h.WebSocket)
 	mux.HandleFunc("POST /api/v1/pair", h.Pair)
 	mux.HandleFunc("GET /api/v1/peers", h.ListPeers)
+	mux.HandleFunc("GET /api/v1/speedtest/download", h.SpeedTestDownload)
+	mux.HandleFunc("POST /api/v1/speedtest/upload", h.SpeedTestUpload)
 
 	// Wrap with middleware: logging -> requestID -> auth
 	authMiddleware := apiTokenAuthMiddleware(rdb)
