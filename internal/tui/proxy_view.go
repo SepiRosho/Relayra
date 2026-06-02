@@ -38,7 +38,7 @@ type proxiesLoadedMsg struct {
 
 // NewProxyView creates a new proxy management view.
 func NewProxyView(cfg *config.Config, rdb store.Backend) *ProxyView {
-	mgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
+	mgr := proxy.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 	return &ProxyView{manager: mgr, rdb: rdb, cfg: cfg}
 }
 

@@ -32,7 +32,7 @@ func Run(ctx context.Context, cfg *config.Config, rdb store.Backend) error {
 		return fmt.Errorf("no Listener paired — run 'relayra pair connect <token>' first")
 	}
 
-	proxyMgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
+	proxyMgr := proxy.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 	proxyCount, _ := proxyMgr.Count(ctx)
 	mode := cfg.NormalizedTransportMode()
 

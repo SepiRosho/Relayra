@@ -69,6 +69,7 @@ type Config struct {
 	WSReconnectBaseSeconds   int    `env:"RELAYRA_WS_RECONNECT_BASE_SECONDS"`
 	WSReconnectMaxSeconds    int    `env:"RELAYRA_WS_RECONNECT_MAX_SECONDS"`
 	WSEnableLongPollFallback bool   `env:"RELAYRA_WS_ENABLE_LONGPOLL_FALLBACK"`
+	AllowDirectConnection    bool   `env:"RELAYRA_ALLOW_DIRECT_CONNECTION"`
 
 	// Execution
 	AllowListenerExecution bool `env:"RELAYRA_ALLOW_LISTENER_EXECUTION"`
@@ -111,6 +112,7 @@ func DefaultConfig() *Config {
 		WSReconnectBaseSeconds:   1,
 		WSReconnectMaxSeconds:    30,
 		WSEnableLongPollFallback: true,
+		AllowDirectConnection:    true,
 		AllowListenerExecution:   false,
 		LogLevel:                 "info",
 		LogDir:                   "/opt/relayra/logs",
@@ -182,6 +184,7 @@ func Load() (*Config, error) {
 	cfg.WSReconnectBaseSeconds = getEnvInt("RELAYRA_WS_RECONNECT_BASE_SECONDS", cfg.WSReconnectBaseSeconds)
 	cfg.WSReconnectMaxSeconds = getEnvInt("RELAYRA_WS_RECONNECT_MAX_SECONDS", cfg.WSReconnectMaxSeconds)
 	cfg.WSEnableLongPollFallback = getEnvBool("RELAYRA_WS_ENABLE_LONGPOLL_FALLBACK", cfg.WSEnableLongPollFallback)
+	cfg.AllowDirectConnection = getEnvBool("RELAYRA_ALLOW_DIRECT_CONNECTION", cfg.AllowDirectConnection)
 	cfg.AllowListenerExecution = getEnvBool("RELAYRA_ALLOW_LISTENER_EXECUTION", cfg.AllowListenerExecution)
 	cfg.LogLevel = getEnvStr("RELAYRA_LOG_LEVEL", cfg.LogLevel)
 	cfg.LogDir = getEnvStr("RELAYRA_LOG_DIR", cfg.LogDir)
@@ -247,6 +250,7 @@ func Save(cfg *Config) error {
 		fmt.Sprintf("RELAYRA_WS_RECONNECT_BASE_SECONDS=%d", cfg.WSReconnectBaseSeconds),
 		fmt.Sprintf("RELAYRA_WS_RECONNECT_MAX_SECONDS=%d", cfg.WSReconnectMaxSeconds),
 		fmt.Sprintf("RELAYRA_WS_ENABLE_LONGPOLL_FALLBACK=%t", cfg.WSEnableLongPollFallback),
+		fmt.Sprintf("RELAYRA_ALLOW_DIRECT_CONNECTION=%t", cfg.AllowDirectConnection),
 		"",
 		"# Execution",
 		fmt.Sprintf("RELAYRA_ALLOW_LISTENER_EXECUTION=%t", cfg.AllowListenerExecution),

@@ -20,16 +20,19 @@ const (
 
 // Manager handles proxy storage, health checking, and rotation.
 type Manager struct {
-	rdb      store.Backend
-	cooldown time.Duration
+	rdb         store.Backend
+	cooldown    time.Duration
+	allowDirect bool
 }
 
-// NewManager creates a new proxy Manager.
-func NewManager(rdb store.Backend, cooldown time.Duration) *Manager {
+// NewManager creates a new proxy Manager. When allowDirect is true, GetTransport
+// returns a direct (no-proxy) connection instead of an error when no proxies are
+// configured or all proxies are exhausted / in cooldown.
+func NewManager(rdb store.Backend, cooldown time.Duration, allowDirect bool) *Manager {
 	if cooldown <= 0 {
 		cooldown = 5 * time.Minute
 	}
-	return &Manager{rdb: rdb, cooldown: cooldown}
+	return &Manager{rdb: rdb, cooldown: cooldown, allowDirect: allowDirect}
 }
 
 // Add adds a proxy URL with a priority score (lower = higher priority).
@@ -94,8 +97,15 @@ type ProxyInfo struct {
 	Healthy     bool      `json:"healthy"`
 }
 
+// DirectURL is the sentinel value returned by GetTransport when a direct
+// (no-proxy) connection is used. Callers should treat it as a no-op for
+// MarkSuccess / MarkFailed.
+const DirectURL = "direct"
+
 // GetTransport returns an http.Transport configured with the best available proxy.
-// It tries proxies in priority order, skipping those in cooldown.
+// It tries proxies in priority order, skipping those in cooldown. If no proxy is
+// available and allowDirect is true, it returns a plain direct transport instead
+// of an error.
 func (m *Manager) GetTransport(ctx context.Context) (http.RoundTripper, string, error) {
 	ctx = logger.WithComponent(ctx, "proxy")
 
@@ -105,6 +115,10 @@ func (m *Manager) GetTransport(ctx context.Context) (http.RoundTripper, string, 
 	}
 
 	if len(proxies) == 0 {
+		if m.allowDirect {
+			slog.InfoContext(ctx, "no proxies configured, using direct connection")
+			return m.directTransport(), DirectURL, nil
+		}
 		return nil, "", fmt.Errorf("no proxies configured")
 	}
 
@@ -130,11 +144,18 @@ func (m *Manager) GetTransport(ctx context.Context) (http.RoundTripper, string, 
 		return transport, p.URL, nil
 	}
 
+	if m.allowDirect {
+		slog.WarnContext(ctx, "all proxies exhausted or in cooldown, falling back to direct connection")
+		return m.directTransport(), DirectURL, nil
+	}
 	return nil, "", fmt.Errorf("all proxies exhausted or in cooldown")
 }
 
-// MarkSuccess resets the fail count for a proxy.
+// MarkSuccess resets the fail count for a proxy. No-op for the direct sentinel.
 func (m *Manager) MarkSuccess(ctx context.Context, proxyURL string) {
+	if proxyURL == DirectURL {
+		return
+	}
 	ctx = logger.WithComponent(ctx, "proxy")
 	if err := m.rdb.MarkProxySuccess(ctx, proxyURL); err != nil {
 		slog.WarnContext(ctx, "failed to mark proxy healthy", "url", proxyURL, "error", err)
@@ -143,12 +164,15 @@ func (m *Manager) MarkSuccess(ctx context.Context, proxyURL string) {
 	slog.DebugContext(ctx, "proxy marked healthy", "url", proxyURL)
 }
 
-// MarkFailed increments the fail count for a proxy.
+// MarkFailed increments the fail count for a proxy. No-op for the direct sentinel.
 func (m *Manager) MarkFailed(ctx context.Context, proxyURL string) {
 	m.markFailed(ctx, proxyURL)
 }
 
 func (m *Manager) markFailed(ctx context.Context, proxyURL string) {
+	if proxyURL == DirectURL {
+		return
+	}
 	ctx = logger.WithComponent(ctx, "proxy")
 	failCount, err := m.rdb.MarkProxyFailed(ctx, proxyURL)
 	if err != nil {
@@ -156,6 +180,15 @@ func (m *Manager) markFailed(ctx context.Context, proxyURL string) {
 		return
 	}
 	slog.WarnContext(ctx, "proxy marked failed", "url", proxyURL, "fail_count", failCount)
+}
+
+func (m *Manager) directTransport() http.RoundTripper {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
 }
 
 // Test tests connectivity through a specific proxy URL.

@@ -45,7 +45,7 @@ var proxyAddCmd = &cobra.Command{
 		_ = cfg
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 
 		// Auto-assign priority based on current count
 		count, _ := mgr.Count(ctx)
@@ -72,7 +72,7 @@ var proxyRemoveCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 
 		if err := mgr.Remove(ctx, args[0]); err != nil {
 			return err
@@ -94,7 +94,7 @@ var proxyListCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 
 		proxies, err := mgr.List(ctx)
 		if err != nil {
@@ -136,7 +136,7 @@ var proxyTestCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 
 		if len(args) == 1 {
 			// Test specific proxy
@@ -183,7 +183,7 @@ var proxyResetCooldownCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 
 		count, err := mgr.ResetAllCooldowns(ctx)
 		if err != nil {
@@ -211,7 +211,7 @@ var proxyTestLongPollCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 		listener, err := rdb.GetListenerInfo(ctx)
 		if err != nil || listener == nil {
 			return fmt.Errorf("no listener paired. Run 'relayra pair connect <token>' first")
@@ -261,7 +261,7 @@ var proxyTestWebSocketCmd = &cobra.Command{
 		defer rdb.Close()
 
 		ctx := logger.WithComponent(context.Background(), "proxy")
-		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown())
+		mgr := proxyPkg.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 		listener, err := rdb.GetListenerInfo(ctx)
 		if err != nil || listener == nil {
 			return fmt.Errorf("no listener paired. Run 'relayra pair connect <token>' first")

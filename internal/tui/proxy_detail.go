@@ -63,7 +63,7 @@ type proxyUpdatedMsg struct {
 
 // NewProxyDetailView creates a detail view for a specific proxy.
 func NewProxyDetailView(cfg *config.Config, rdb store.Backend, proxyURL string) *ProxyDetailView {
-	mgr := proxy.NewManager(rdb, cfg.ProxyCooldown())
+	mgr := proxy.NewManager(rdb, cfg.ProxyCooldown(), cfg.AllowDirectConnection)
 
 	pd := &ProxyDetailView{
 		cfg:      cfg,
