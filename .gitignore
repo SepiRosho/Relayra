@@ -29,6 +29,7 @@
 .vscode/
 *.swp
 *.swo
+/graphify-out
 
 # OS files
 .DS_Store

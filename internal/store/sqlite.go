@@ -1013,7 +1013,25 @@ func (s *SQLite) PendingResultsCount(ctx context.Context) (int64, error) {
 }
 
 func (s *SQLite) RePushResults(ctx context.Context, results []models.RelayResult) error {
-	return nil
+	if len(results) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin repush results tx: %w", err)
+	}
+	defer tx.Rollback()
+	for _, result := range results {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE pending_results
+			SET delivery_status = ?, lease_until = 0, updated_at = ?
+			WHERE request_id = ? AND delivery_status = ?
+		`, string(models.ResultPending), now, result.RequestID, string(models.ResultLeased)); err != nil {
+			return fmt.Errorf("repush result %s: %w", result.RequestID, err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLite) DeleteAckedResults(ctx context.Context, resultIDs []string) {

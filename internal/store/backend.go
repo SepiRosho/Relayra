@@ -51,6 +51,7 @@ type Backend interface {
 
 	PushResult(ctx context.Context, result *models.RelayResult) error
 	LeaseResults(ctx context.Context, maxCount int, leaseTTL time.Duration) ([]models.RelayResult, error)
+	RePushResults(ctx context.Context, results []models.RelayResult) error
 	PendingResultsCount(ctx context.Context) (int64, error)
 	AckResults(ctx context.Context, resultIDs []string) error
 	ResultPending(ctx context.Context, requestID string) (bool, error)

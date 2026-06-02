@@ -223,9 +223,24 @@ func (r *Redis) PendingResultsCount(ctx context.Context) (int64, error) {
 	return r.Client.ZCard(ctx, keyPendingResultsSet).Result()
 }
 
-// RePushResults remains a no-op because leased results stay durable until acked.
+// RePushResults resets the delivery_status of leased results back to pending so
+// they can be picked up immediately by the next poll cycle. Call this after a
+// poll cycle fails so that results leased for that cycle are not stuck behind
+// their lease TTL.
 func (r *Redis) RePushResults(ctx context.Context, results []models.RelayResult) error {
-	return nil
+	if len(results) == 0 {
+		return nil
+	}
+	pipe := r.Client.Pipeline()
+	for _, result := range results {
+		resultKey := keyPendingResultPrefix + result.RequestID
+		pipe.HSet(ctx, resultKey, map[string]interface{}{
+			resultStatusField:     string(models.ResultPending),
+			resultLeaseUntilField: 0,
+		})
+	}
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 // DeleteAckedResults removes results that the Listener has acknowledged.

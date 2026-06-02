@@ -184,6 +184,7 @@ func doPollCycleHTTP(ctx context.Context, cfg *config.Config, rdb store.Backend,
 			"listener", listenerInfo.Address,
 		)
 		proxyMgr.MarkFailed(ctx, proxyURL)
+		_ = rdb.RePushResults(ctx, leasedResults)
 		return false
 	}
 	defer resp.Body.Close()
@@ -191,6 +192,7 @@ func doPollCycleHTTP(ctx context.Context, cfg *config.Config, rdb store.Backend,
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to read poll response", "error", err)
+		_ = rdb.RePushResults(ctx, leasedResults)
 		return false
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -198,6 +200,7 @@ func doPollCycleHTTP(ctx context.Context, cfg *config.Config, rdb store.Backend,
 			"status", resp.StatusCode,
 			"body", truncateStr(string(respBody), 4096),
 		)
+		_ = rdb.RePushResults(ctx, leasedResults)
 		return false
 	}
 
@@ -304,16 +307,24 @@ func handleIncomingRequest(ctx context.Context, cfg *config.Config, rdb store.Ba
 		shouldDispatch = true
 	}
 
-	receivedState := &models.RequestSyncState{
+	// For duplicates, preserve the existing status so the listener gets accurate
+	// state information (e.g. "completed") instead of always seeing "received".
+	// Only use StatusReceived when dispatching for the first time.
+	reportStatus := models.StatusReceived
+	if !shouldDispatch && state != nil {
+		reportStatus = state.Status
+	}
+
+	syncState := &models.RequestSyncState{
 		RequestID:  req.ID,
-		Status:     models.StatusReceived,
+		Status:     reportStatus,
 		LeaseUntil: leaseUntil,
 		UpdatedAt:  now,
 	}
-	if err := rdb.StoreSenderRequestState(reqCtx, receivedState); err != nil {
+	if err := rdb.StoreSenderRequestState(reqCtx, syncState); err != nil {
 		return err
 	}
-	if err := queueSenderRequestStateWS(reqCtx, rdb, dispatcher.listenerID, *receivedState); err != nil {
+	if err := queueSenderRequestStateWS(reqCtx, rdb, dispatcher.listenerID, *syncState); err != nil {
 		slog.ErrorContext(reqCtx, "failed to queue received websocket state", "error", err)
 	} else {
 		dispatcher.NotifyOutbox()
@@ -321,7 +332,7 @@ func handleIncomingRequest(ctx context.Context, cfg *config.Config, rdb store.Ba
 
 	if !shouldDispatch {
 		slog.InfoContext(reqCtx, "duplicate request received; keeping durable state without redispatch",
-			"status", receivedState.Status,
+			"status", reportStatus,
 			"pending_result", pendingResult,
 		)
 		return nil
