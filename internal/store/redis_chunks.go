@@ -122,6 +122,14 @@ func (r *Redis) StoreInboundChunk(ctx context.Context, chunk models.TransportChu
 
 func (r *Redis) StoreInboundResultChunk(ctx context.Context, chunk models.TransportChunk, ttl time.Duration) (*models.RelayResult, error) {
 	stateKey := keyInboundChunkPrefix + chunk.TransferID
+
+	// Chunk 0 signals the start of a new transfer attempt (e.g. after a WS
+	// reconnect that re-chunked the result at a different size). Discard any
+	// stale state so we don't reject the new transfer on a total/checksum mismatch.
+	if chunk.Index == 0 {
+		r.Client.Del(ctx, stateKey)
+	}
+
 	state, err := r.Client.HGetAll(ctx, stateKey).Result()
 	if err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("load inbound result chunk state: %w", err)
